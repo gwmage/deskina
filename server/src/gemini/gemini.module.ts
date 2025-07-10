@@ -4,16 +4,16 @@ import { GeminiService } from './gemini.service';
 import { AgentService } from './agent.service';
 import { EmbeddingService } from './embedding.service';
 import { VectorStoreService } from './vector-store.service';
-import { PrismaService } from '../prisma.service';
+import { SessionModule } from '../session/session.module';
 
 @Module({
+  imports: [SessionModule],
   controllers: [GeminiController],
   providers: [
     GeminiService,
     AgentService,
     EmbeddingService,
     VectorStoreService,
-    PrismaService,
   ],
   exports: [GeminiService, AgentService],
 })

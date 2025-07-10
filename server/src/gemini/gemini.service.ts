@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI, Part, Content, GenerationConfig, GenerateContentResponse } from '@google/genai';
 import { VectorStoreService } from './vector-store.service';
+import { SessionService } from '../session/session.service'; // Import SessionService
 import { AgentAction } from './agent.service';
 import { Observable } from 'rxjs';
 
@@ -14,6 +15,7 @@ export class GeminiService implements OnModuleInit {
   constructor(
     private configService: ConfigService,
     private vectorStore: VectorStoreService,
+    private sessionService: SessionService, // Inject SessionService
   ) {}
 
   onModuleInit() {
@@ -54,14 +56,32 @@ Example: { "action": "runCommand", "parameters": { "command": "npm run build" } 
   }
 
   async *generateStream(
+    userId: string,
     prompt: string,
+    sessionId?: string,
     imageBase64?: string,
   ): AsyncGenerator<any> {
-    this.logger.debug(`Streaming for prompt: ${prompt}`);
-    await this.vectorStore.addConversation('user', prompt);
+    this.logger.debug(`Streaming for prompt: "${prompt}" in session: ${sessionId} by user: ${userId}`);
+
+    let currentSessionId = sessionId;
+
+    // If no session ID is provided, create a new session.
+    if (!currentSessionId) {
+      const newSession = await this.sessionService.create(prompt, userId); // Pass userId here
+      currentSessionId = newSession.id;
+      this.logger.debug(`Created new session with ID: ${currentSessionId} for user: ${userId}`);
+      // Yield a special event to inform the client about the new session ID
+      yield { data: { type: 'session_id', payload: currentSessionId } };
+    }
+
+    await this.vectorStore.addConversation(
+      currentSessionId,
+      'user',
+      prompt,
+    );
 
     const relevantConversations =
-      await this.vectorStore.findRelevantConversations(prompt);
+      await this.vectorStore.findRelevantConversations(currentSessionId, prompt);
     const relevantHistoryText =
       relevantConversations.length > 0
         ? relevantConversations
@@ -112,73 +132,11 @@ Example: { "action": "runCommand", "parameters": { "command": "npm run build" } 
     }
     
     await this.vectorStore.addConversation(
+      currentSessionId,
       'model',
       JSON.stringify(agentAction),
     );
 
     yield { data: { type: 'final', payload: agentAction } };
-  }
-
-  async generateWithTools(prompt: string, imageBase64?: string): Promise<AgentAction> {
-    this.logger.debug(`Generating with tools for prompt: ${prompt}`);
-
-    await this.vectorStore.addConversation('user', prompt);
-
-    const relevantConversations = await this.vectorStore.findRelevantConversations(prompt);
-    const relevantHistoryText = relevantConversations.length > 0
-        ? relevantConversations.map(conv => `${conv.role}: ${conv.content}`).join('\n')
-        : "No relevant history found.";
-
-    const systemPrompt = this.getSystemPrompt(relevantHistoryText);
-    const currentUserParts: Part[] = [{ text: systemPrompt }, { text: `\n\nCURRENT REQUEST: ${prompt}` }];
-
-    if (imageBase64) {
-      this.logger.debug('Adding image part to the prompt.');
-      currentUserParts.push({ inlineData: { mimeType: 'image/png', data: imageBase64 } });
-    }
-
-    const maxRetries = 3;
-    let lastError: Error | null = null;
-
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const result: GenerateContentResponse = await this.genAI.models.generateContent({
-            model: "gemini-1.5-flash-latest",
-            contents: [{ role: 'user', parts: currentUserParts }],
-            config: this.generationConfig,
-        });
-
-        const responseText = result.text;
-        this.logger.debug(`LLM Raw Response: ${responseText}`);
-
-        let agentAction: AgentAction;
-        try {
-          const cleanedJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-          agentAction = JSON.parse(cleanedJson);
-        } catch (e) {
-          this.logger.warn("LLM response was not valid JSON. Treating as a 'reply' action.", e);
-          agentAction = { action: 'reply', parameters: { text: responseText } };
-        }
-
-        await this.vectorStore.addConversation('model', JSON.stringify(agentAction));
-        return agentAction; // Success, exit the loop and return
-
-      } catch (error) {
-        lastError = error;
-        // Check for 503 Service Unavailable or similar transient errors
-        if (error.status === 'UNAVAILABLE' || (error.message && error.message.includes('overloaded'))) {
-          const delay = Math.pow(2, i) * 1000; // Exponential backoff: 1s, 2s, 4s
-          this.logger.warn(`Model overloaded (attempt ${i + 1}/${maxRetries}). Retrying in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          // It's not a retryable error, so rethrow it immediately
-          throw error;
-        }
-      }
-    }
-
-    // If all retries have failed
-    this.logger.error(`Failed to generate content after ${maxRetries} retries.`);
-    throw lastError; // Throw the last captured error
   }
 }

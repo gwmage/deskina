@@ -13,13 +13,19 @@ export class VectorStoreService {
     private embeddingService: EmbeddingService,
   ) {}
 
-  async addConversation(role: string, content: string): Promise<void> {
+  async addConversation(
+    sessionId: string,
+    role: string,
+    content: string,
+  ): Promise<void> {
     if (!content || typeof content !== 'string') {
       this.logger.warn(`Skipping adding conversation for role ${role} due to empty content.`);
       return;
     }
     
-    this.logger.debug(`Adding conversation to vector store: ${role}`);
+    this.logger.debug(
+      `Adding conversation to session ${sessionId}: ${role}`,
+    );
     try {
       const embedding = await this.embeddingService.createEmbedding(content);
       const embeddingVector = `[${embedding.join(',')}]`;
@@ -28,8 +34,8 @@ export class VectorStoreService {
       // Use raw query to insert data with a vector type, which Prisma doesn't natively support for insertion yet.
       // Backticks are used to escape the table name `Conversation` which can be a reserved keyword in SQL.
       await this.prisma.$executeRaw`
-        INSERT INTO \`Conversation\` (id, role, content, embedding, createdAt)
-        VALUES (${id}, ${role}, ${content}, CAST(${embeddingVector} AS JSON), NOW())
+        INSERT INTO \`Conversation\` (id, sessionId, role, content, embedding, createdAt)
+        VALUES (${id}, ${sessionId}, ${role}, ${content}, CAST(${embeddingVector} AS JSON), NOW())
       `;
     } catch (error) {
       this.logger.error(`Failed to add conversation for role ${role}:`, error.stack);
@@ -38,10 +44,13 @@ export class VectorStoreService {
   }
 
   async findRelevantConversations(
+    sessionId: string,
     query: string,
     limit: number = 5,
   ): Promise<Conversation[]> {
-    this.logger.debug(`Finding relevant conversations for: "${query}"`);
+    this.logger.debug(
+      `Finding relevant conversations in session ${sessionId} for: "${query}"`,
+    );
     try {
       const queryEmbedding = await this.embeddingService.createEmbedding(query);
       const queryVector = `[${queryEmbedding.join(',')}]`;
@@ -52,11 +61,14 @@ export class VectorStoreService {
       const results = await this.prisma.$queryRaw<Conversation[]>`
         SELECT \`id\`, \`role\`, \`content\`, \`createdAt\`
         FROM \`Conversation\`
+        WHERE \`sessionId\` = ${sessionId}
         ORDER BY \`embedding\` <=> CAST(${queryVector} AS JSON)
         LIMIT ${limit}
       `;
 
-      this.logger.debug(`Found ${results.length} relevant conversations.`);
+      this.logger.debug(
+        `Found ${results.length} relevant conversations in session ${sessionId}.`,
+      );
       // Returns results from most to least relevant.
       return results;
     } catch (error) {
