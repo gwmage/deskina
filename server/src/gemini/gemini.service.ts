@@ -32,11 +32,16 @@ export class GeminiService implements OnModuleInit {
   }
 
   private getSystemPrompt(relevantHistory: string): string {
-    return `You are a machine that converts a user request into a single, structured JSON object.
+    return `You are Deskina, a friendly and capable AI assistant with a sense of humor.
 
-**RULES (NO EXCEPTIONS):**
-1.  **STRUCTURED CONTENT IS REQUIRED:** For the \`reply\` tool, you MUST structure the output in the \`parameters.content\` array. Each item in the array must be an object with a "type" ('text' or 'code') and a "value". For "code" items, you MUST also include a "language". This is the most important rule.
-2.  **JSON ONLY:** Your entire output MUST be a single JSON object.
+**PERSONALITY:**
+1.  **Be Friendly & Engaging:** Use a warm and conversational tone.
+2.  **Use Emojis:** Sprinkle relevant emojis (like ✨, 🤖, 🚀) into your text responses to make them more lively and fun!
+3.  **Be a Helper:** Your goal is to be genuinely helpful and make the user's task easier.
+
+**TECHNICAL RULES (NO EXCEPTIONS):**
+1.  **STRUCTURED CONTENT IS REQUIRED:** For the \`reply\` tool, you MUST use the \`parameters.content\` array. Each item must have a "type" ('text' or 'code') and a "value". This is non-negotiable.
+2.  **JSON ONLY:** Your entire output MUST be a single, valid JSON object.
 3.  **LANGUAGE:** Text values must be in the same language as the user's last message.
 
 <CONVERSATION_HISTORY>
@@ -44,7 +49,7 @@ ${relevantHistory}
 </CONVERSATION_HISTORY>
 
 **TOOLS:**
-- \`reply\`: To answer questions. Its "parameters" must contain a "content" array.
+- \`reply\`: To answer questions.
 - \`runCommand\`: To execute commands.
 
 **PERFECT RESPONSE EXAMPLE (KOREAN):**
@@ -52,9 +57,9 @@ ${relevantHistory}
   "action": "reply",
   "parameters": {
     "content": [
-      { "type": "text", "value": "요청하신 Nginx 설치 명령어입니다." },
+      { "type": "text", "value": "물론이죠! Nginx 설치는 식은 죽 먹기랍니다 🥣. 다음 명령어를 입력해주세요!" },
       { "type": "code", "language": "bash", "value": "sudo apt update\\nsudo apt install nginx" },
-      { "type": "text", "value": "설치 후 상태를 확인하세요." }
+      { "type": "text", "value": "설치가 끝나면 알려주세요! 다음 스텝을 준비하고 있을게요 🚀" }
     ]
   }
 }`;
@@ -125,14 +130,19 @@ ${relevantHistory}
       agentAction = JSON.parse(cleanedJson);
     } catch (e) {
       this.logger.warn("Streamed response was not valid JSON. Replying with raw text.", e);
-      agentAction = { action: 'reply', parameters: { text: completeResponse } };
+      agentAction = { action: 'reply', parameters: { content: [{ type: 'text', value: completeResponse }] } };
     }
 
-    if (agentAction.action === 'reply' && agentAction.parameters.text) {
-      const textToStream = agentAction.parameters.text;
-      for (const char of textToStream.split('')) {
-          yield { data: { type: 'chunk', payload: char } };
-          await new Promise(resolve => setTimeout(resolve, 10));
+    if (agentAction.action === 'reply' && Array.isArray(agentAction.parameters.content)) {
+      for (const item of agentAction.parameters.content) {
+        if (item.type === 'text') {
+          for (const char of item.value.split('')) {
+            yield { data: JSON.stringify({ type: 'text_chunk', payload: char }) };
+            await new Promise(resolve => setTimeout(resolve, 5)); // Small delay for effect
+          }
+        } else if (item.type === 'code') {
+          yield { data: JSON.stringify({ type: 'code_chunk', payload: item }) };
+        }
       }
     }
     
@@ -142,6 +152,6 @@ ${relevantHistory}
       JSON.stringify(agentAction),
     );
 
-    yield { data: { type: 'final', payload: agentAction } };
+    yield { data: JSON.stringify({ type: 'final', payload: agentAction }) };
   }
 }

@@ -309,6 +309,7 @@ function App() {
 
     const eventSource = new EventSource(url);
     let streamingText = '';
+    let accumulatedContent = [];
 
     eventSource.onmessage = (event) => {
       try {
@@ -320,7 +321,6 @@ function App() {
                 setCurrentSessionId(newSessionId);
                 window.history.pushState({ sessionId: newSessionId }, '', `?sessionId=${newSessionId}`);
                 
-                // Refetch sessions to include the new one, using the authenticated fetch
                 const refetchSessions = async () => {
                     try {
                         const response = await apiFetch(`${API_URL}/session`);
@@ -334,13 +334,26 @@ function App() {
                 };
                 refetchSessions();
             }
-        } else if (parsedData.type === 'chunk') {
+        } else if (parsedData.type === 'text_chunk') {
           streamingText += parsedData.payload;
-          setModelResponse(streamingText);
+          
+          const lastItem = accumulatedContent[accumulatedContent.length - 1];
+          if (lastItem && lastItem.type === 'text') {
+            lastItem.value = streamingText;
+          } else {
+            accumulatedContent.push({ type: 'text', value: streamingText });
+          }
+          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+
+        } else if (parsedData.type === 'code_chunk') {
+          streamingText = ''; // Reset for next text block
+          accumulatedContent.push(parsedData.payload);
+          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+
         } else if (parsedData.type === 'final') {
           const finalAction = parsedData.payload;
           setHistory(prev => [...prev, { role: 'model', content: finalAction }]);
-          setModelResponse('');
+          setModelResponse(null);
           setIsLoading(false);
           eventSource.close();
         }
@@ -388,6 +401,8 @@ function App() {
   };
   
   const renderTurn = (turnContent, index) => {
+    if (!turnContent) return null; // Guard against null content
+
     if (typeof turnContent === 'string') {
         return <ReactMarkdown components={{ code: CodeBlock }} remarkPlugins={[remarkGfm]}>{turnContent}</ReactMarkdown>;
     }
@@ -461,7 +476,7 @@ function App() {
                     }
                 })}
                 {isLoading && !modelResponse && <div className="loading-indicator">Thinking...</div>}
-                {modelResponse && <div className="message model"><ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>{modelResponse}</ReactMarkdown></div>}
+                {modelResponse && <div className="message model">{renderTurn(modelResponse, 'streaming')}</div>}
                 <div ref={chatEndRef} />
             </div>
             <form onSubmit={handleSubmit} className="message-form">
