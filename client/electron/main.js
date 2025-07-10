@@ -19,6 +19,9 @@ function createWindow() {
     },
   });
 
+  // Remove the application menu
+  win.setMenu(null);
+
   // and load the index.html of the app.
   // win.loadFile("index.html");
   const startUrl = isDev

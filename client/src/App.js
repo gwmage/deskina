@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import './App.css';
 
 const API_URL = 'http://localhost:3001';
+const MAX_MESSAGES = 100; // Keep the last 100 messages in view
 
 const CodeCopyBlock = ({ language, code }) => {
   const [isCopied, setIsCopied] = useState(false);
@@ -381,6 +382,13 @@ function App() {
     }
   }, [currentSessionId, fetchSessionHistory]);
 
+  // Effect 3: Limit the number of messages in the history to prevent performance issues.
+  useEffect(() => {
+    if (history.length > MAX_MESSAGES) {
+      setHistory(prevHistory => prevHistory.slice(prevHistory.length - MAX_MESSAGES));
+    }
+  }, [history]);
+
 
   const beforeHistoryRender = useRef(null);
   // This layout effect handles scroll positioning.
@@ -724,9 +732,6 @@ function App() {
             onLogout={handleLogout}
         />
         <main className="main-content">
-            <header className="App-header">
-                <h1>Deskina AI Agent</h1>
-            </header>
             <div className="chat-window" ref={scrollRef}>
                 {hasMoreConversations && (
                   <div className="load-more-container">
