@@ -37,6 +37,8 @@ body {
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border-color);
+  transition: width 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
+  overflow-x: hidden;
 }
 
 .new-chat-button {
@@ -111,6 +113,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  position: relative; /* For positioning the toggle button */
 }
 
 .App-header {
@@ -445,4 +448,39 @@ body {
 .loading-indicator {
   text-align: center;
   padding: 10px;
+}
+
+/* New styles for the sidebar toggle functionality */
+.sidebar-toggle-button {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1000;
+  background-color: var(--button-bg-color);
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0;
+  padding-bottom: 3px;
+  transition: background-color 0.2s;
+}
+
+.sidebar-toggle-button:hover {
+  background-color: var(--button-hover-color);
+}
+
+.App-container.sidebar-closed .sidebar {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  opacity: 0;
+  border-right: none;
 }

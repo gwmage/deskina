@@ -255,6 +255,7 @@ const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation
 // Main App component
 function App() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem('authToken'));
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [prompt, setPrompt] = useState('');
   const [history, setHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -723,7 +724,7 @@ function App() {
   };
     
   return (
-    <div className="App-container">
+    <div className={`App-container ${!isSidebarOpen ? 'sidebar-closed' : ''}`}>
         <Sidebar 
             sessions={sessions}
             currentSessionId={currentSessionId}
@@ -732,6 +733,12 @@ function App() {
             onLogout={handleLogout}
         />
         <main className="main-content">
+            <button 
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+              className="sidebar-toggle-button"
+            >
+              {isSidebarOpen ? '‹' : '›'}
+            </button>
             <div className="chat-window" ref={scrollRef}>
                 {hasMoreConversations && (
                   <div className="load-more-container">
