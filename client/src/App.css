@@ -1,3 +1,17 @@
+:root {
+  --background-color: #212121;
+  --sidebar-color: #171717;
+  --chat-area-color: #212121;
+  --message-user-bg: #3f51b5;
+  --message-model-bg: #333333;
+  --text-color: #e0e0e0;
+  --text-color-dark: #b0b0b0;
+  --border-color: #444;
+  --code-bg-color: #000;
+  --button-bg-color: #4f4f4f;
+  --button-hover-color: #5a5a5a;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -5,8 +19,8 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #282c34;
-  color: white;
+  background-color: var(--background-color);
+  color: var(--text-color);
 }
 
 .App {
@@ -24,24 +38,27 @@ body {
 
 .chat-window {
   flex-grow: 1;
-  padding: 20px;
   overflow-y: auto;
-  text-align: left;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
 }
 
 .message {
-  margin-bottom: 15px;
   padding: 10px 15px;
-  border-radius: 18px;
-  max-width: 70%;
-  word-wrap: break-word;
+  margin: 10px;
+  max-width: 80%;
+  border-radius: 15px;
+  line-height: 1.5;
+  display: flex; /* Ensure flex properties work */
 }
 
 .message.user {
   background-color: #007bff;
   color: white;
   align-self: flex-end;
-  margin-left: auto;
+  border-radius: 15px 15px 0 15px;
+  margin-left: auto; /* Push to the right */
 }
 
 .message.ai {
@@ -49,6 +66,91 @@ body {
   color: white;
   align-self: flex-start;
 }
+
+.message.model {
+  background-color: #f0f0f0;
+  color: #333;
+  align-self: flex-start;
+  border-radius: 15px 15px 15px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Container for code blocks to position the copy button */
+.code-container {
+  position: relative;
+  margin: 0.5em 0;
+  background-color: var(--code-bg-color);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  overflow: hidden; /* Ensures header corners are rounded */
+}
+
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #333;
+  padding: 0.5rem 1rem;
+  color: #d1d5db;
+  font-size: 0.9em;
+}
+
+.code-header span {
+  font-family: 'Fira Code', 'Courier New', Courier, monospace;
+}
+
+/* Styles for markdown rendering */
+.message.model pre {
+  background-color: transparent;
+  color: #d1d5db;
+  padding: 1rem;
+  border-radius: 8px;
+  overflow-x: auto; /* Allow horizontal scrolling for long code */
+  white-space: pre-wrap; /* Wrap long lines */
+  font-family: 'Fira Code', 'Courier New', Courier, monospace;
+  margin: 0;
+}
+
+.copy-button {
+  background: transparent;
+  color: #eee;
+  border: none;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1.2em;
+  opacity: 1; /* Always visible */
+  transition: background-color 0.2s ease-in-out;
+  line-height: 1;
+}
+
+.copy-button:hover {
+  background-color: #555;
+}
+
+.code-container:hover .copy-button {
+  opacity: 1;
+}
+
+.copy-button:active {
+  background: #666;
+}
+
+.message.model code {
+  font-family: 'Fira Code', 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+}
+
+/* Style for inline code */
+.message.model :not(pre) > code {
+  background-color: #e0e0e0;
+  padding: 0.2em 0.4em;
+  margin: 0;
+  font-size: 85%;
+  border-radius: 3px;
+}
+
 
 .message p {
   margin: 0;
@@ -97,8 +199,200 @@ body {
 }
 
 .loading-indicator {
+  align-self: flex-start;
+  color: #888;
+  margin: 10px;
+  padding: 10px 15px;
+}
+
+/* Auth Page Styles */
+.auth-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background-color: #282c34;
+}
+
+.auth-form {
+  background-color: #3a3f47;
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+  width: 100%;
+  max-width: 400px;
   text-align: center;
-  font-style: italic;
-  color: #aaa;
-  margin: 10px 0;
+}
+
+.auth-form h1 {
+  font-size: 2.5rem;
+  font-weight: 300;
+  color: #e0e0e0;
+  margin-bottom: 8px;
+}
+
+.auth-form h2 {
+  margin-bottom: 24px;
+  color: #fff;
+  font-weight: 500;
+}
+
+.auth-form form {
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-form input {
+  background-color: #282c34;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 16px;
+  color: #fff;
+  font-size: 1rem;
+}
+
+.auth-form input:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+}
+
+.auth-form button[type="submit"] {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.auth-form button[type="submit"]:hover {
+  background-color: #0056b3;
+}
+
+.toggle-auth {
+  background: none;
+  border: none;
+  color: #00aaff;
+  cursor: pointer;
+  margin-top: 20px;
+  font-size: 0.9rem;
+}
+
+.toggle-auth:hover {
+  text-decoration: underline;
+}
+
+.auth-form .error {
+  color: #ff4d4d;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+
+.auth-form .message {
+  color: #28a745;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+
+/* Chat UI Container */
+.App-container {
+  display: flex;
+  height: 100vh;
+  background-color: var(--chat-area-color);
+}
+
+.sidebar {
+  width: 260px;
+  background-color: var(--sidebar-color);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+}
+
+.new-chat-button {
+  background-color: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  padding: 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  transition: background-color 0.2s;
+}
+
+.new-chat-button:hover {
+  background-color: var(--button-bg-color);
+}
+
+.sessions-list {
+  flex-grow: 1;
+  overflow-y: auto;
+}
+
+.sessions-list ul {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sessions-list li {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+  transition: background-color 0.2s;
+}
+
+.sessions-list li:hover {
+  background-color: var(--button-bg-color);
+}
+
+.sessions-list li.active {
+  background-color: var(--message-user-bg);
+  color: white;
+}
+
+.logout-button {
+  background: var(--button-bg-color);
+  color: var(--text-color);
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.logout-button:hover {
+  background: var(--button-hover-color);
+}
+
+
+/* Main Content Area */
+.main-content {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.App-header {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.App-header h1 {
+  margin: 0;
+  font-size: 1.2rem;
 }
