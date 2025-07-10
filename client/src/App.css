@@ -1,0 +1,104 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #282c34;
+  color: white;
+}
+
+.App {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.App-header {
+  background-color: #1c1e22;
+  padding: 10px;
+  border-bottom: 1px solid #444;
+}
+
+.chat-window {
+  flex-grow: 1;
+  padding: 20px;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.message {
+  margin-bottom: 15px;
+  padding: 10px 15px;
+  border-radius: 18px;
+  max-width: 70%;
+  word-wrap: break-word;
+}
+
+.message.user {
+  background-color: #007bff;
+  color: white;
+  align-self: flex-end;
+  margin-left: auto;
+}
+
+.message.ai {
+  background-color: #495057;
+  color: white;
+  align-self: flex-start;
+}
+
+.message p {
+  margin: 0;
+}
+
+.message-form {
+  display: flex;
+  padding: 10px;
+  border-top: 1px solid #444;
+}
+
+.message-form input {
+  flex-grow: 1;
+  padding: 10px;
+  border-radius: 20px;
+  border: 1px solid #555;
+  background-color: #3a3f47;
+  color: white;
+  font-size: 1rem;
+}
+
+.message-form input::placeholder {
+  color: #aaa;
+}
+
+.message-form button {
+  padding: 10px 20px;
+  margin-left: 10px;
+  border-radius: 20px;
+  border: none;
+  background-color: #007bff;
+  color: white;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.message-form button:hover {
+  background-color: #0056b3;
+}
+
+.system-message {
+  text-align: center;
+  font-style: italic;
+  color: #aaa;
+  margin: 10px 0;
+}
+
+.loading-indicator {
+  text-align: center;
+  font-style: italic;
+  color: #aaa;
+  margin: 10px 0;
+}
