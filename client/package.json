@@ -2,7 +2,7 @@
   "name": "client",
   "version": "0.1.0",
   "private": true,
-  "main": "public/electron.js",
+  "main": "electron/main.js",
   "homepage": ".",
   "dependencies": {
     "@testing-library/dom": "^10.4.0",
@@ -56,7 +56,8 @@
     "files": [
       "build/**/*",
       "node_modules/**/*",
-      "public/electron.js"
+      "electron/main.js",
+      "electron/preload.js"
     ],
     "directories": {
       "buildResources": "assets"

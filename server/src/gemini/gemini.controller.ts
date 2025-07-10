@@ -1,52 +1,55 @@
-import { Controller, Sse, Get, Query, UseGuards, Req, Logger, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Query, Res, Sse } from '@nestjs/common';
 import { GeminiService } from './gemini.service';
-import { Observable } from 'rxjs';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
+import { Response } from 'express';
 
-
-@UseGuards(JwtAuthGuard)
 @Controller('gemini')
 export class GeminiController {
-  private readonly logger = new Logger(GeminiController.name);
+  constructor(private readonly geminiService: GeminiService) {}
 
-  constructor(
-    private readonly geminiService: GeminiService,
-  ) {}
-
-  @Sse('conversation-stream')
-  conversationStream(
+  @Get('conversation-stream')
+  @Sse()
+  async conversationStream(
+    @Query('userId') userId: string,
     @Query('message') message: string,
     @Query('sessionId') sessionId: string,
-    @Req() req: Request,
-  ): Observable<MessageEvent> {
-    if (!message) {
-      throw new BadRequestException('Message is required');
-    }
-    const userId = req.user.id;
-    const streamGenerator = this.geminiService.generateStream(
-      userId,
-      message,
-      sessionId,
-    );
-    
-    // Convert the async generator to an Observable
-    const observable = new Observable<MessageEvent>(subscriber => {
-      (async () => {
-        try {
-          for await (const value of streamGenerator) {
-            if (subscriber.closed) return;
-            // The generator itself yields the object with a `data` property.
-            subscriber.next(value as MessageEvent); 
-          }
-          subscriber.complete();
-        } catch (err) {
-          this.logger.error(`Error in stream generator: ${err}`);
-          subscriber.error(err);
-        }
-      })();
-    });
+    @Query('platform') platform: string,
+    @Res() res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
 
-    return observable;
+    try {
+      const stream = this.geminiService.generateStream(
+        userId,
+        message,
+        sessionId,
+        null, // imageBase64 is not handled in this endpoint for now
+        platform,
+      );
+
+      for await (const chunk of stream) {
+        // The service now yields the data directly, not wrapped in a `data` object
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+    } catch (error) {
+      console.error(`[GeminiController] Error in stream generator:`, error);
+      const errorPayload = {
+        type: 'error',
+        payload: {
+          message: error.message || 'An unknown error occurred on the server.',
+          // Include additional details if it's a known API error type
+          ...(error.constructor?.name === 'ApiError' && {
+            apiError: true,
+            status: (error as any).status,
+            details: error.message,
+          }),
+        },
+      };
+      res.write(`data: ${JSON.stringify(errorPayload)}\n\n`);
+    } finally {
+      res.end();
+    }
   }
 }

@@ -220,6 +220,7 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const chatEndRef = useRef(null);
+  const eventSourceRef = useRef(null);
 
   const markdownComponents = {
       code: CodeBlock,
@@ -293,8 +294,20 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [history, modelResponse]);
 
+  const handleStop = (isUserInitiated = false) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setIsLoading(false);
+    setModelResponse(null);
+    if (isUserInitiated) {
+      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: '🛑 Operation cancelled by user.' }] } } }]);
+    }
+  };
+
   const executeTurn = async () => {
-    if (!prompt.trim() || !authToken) return;
+    if (!prompt.trim()) return;
 
     const currentPromptText = prompt;
     setHistory(prev => [...prev, { role: 'user', content: currentPromptText }]);
@@ -302,19 +315,32 @@ function App() {
     setIsLoading(true);
     setModelResponse('');
 
-    let url = `${API_URL}/gemini/conversation-stream?message=${encodeURIComponent(currentPromptText)}&token=${authToken}`;
+    const platform = navigator.platform;
+    const userId = 'temp-user-id'; // Temporary user ID
+    let url = `${API_URL}/gemini/conversation-stream?message=${encodeURIComponent(currentPromptText)}&userId=${userId}&platform=${platform}`;
     if (currentSessionId) {
       url += `&sessionId=${currentSessionId}`;
     }
 
-    const eventSource = new EventSource(url);
+    eventSourceRef.current = new EventSource(url);
     let streamingText = '';
     let accumulatedContent = [];
 
-    eventSource.onmessage = (event) => {
+    eventSourceRef.current.onmessage = async (event) => {
       try {
         const parsedData = JSON.parse(event.data);
         
+        if (parsedData.type === 'error') {
+          console.error("Server-side error:", parsedData.payload);
+          let errorMessage = `An error occurred: ${parsedData.payload.message}`;
+          if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
+            errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
+          }
+          setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
+          handleStop(false); // Auto-stop, not user initiated
+          return;
+        }
+
         if (parsedData.type === 'session_id') {
             const newSessionId = parsedData.payload;
             if (newSessionId !== currentSessionId) {
@@ -350,27 +376,171 @@ function App() {
           accumulatedContent.push(parsedData.payload);
           setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
 
+        } else if (parsedData.type === 'command_exec') {
+          // Command execution is a blocking action for the stream
+          const { command, args } = parsedData.payload;
+          
+          // Add a message to history indicating the command is about to run
+          const commandExecutionMessage = {
+            role: 'model',
+            content: {
+              action: 'reply',
+              parameters: {
+                content: [{ type: 'text', value: `🚀 Executing: \`${command} ${args.join(' ')}\`...` }]
+              }
+            }
+          };
+          setHistory(prev => [...prev, commandExecutionMessage]);
+          setModelResponse(null); // Clear any streaming response
+
+          try {
+            // Execute the command via Electron's main process
+            const result = await window.electron.runCommand(command, args);
+            
+            // Create a result message to show the user
+            const resultMessageContent = [
+              { type: 'text', value: result.success ? '✅ Command finished successfully.' : '❌ Command failed.' }
+            ];
+            
+            if (result.output) {
+              resultMessageContent.push({ type: 'code', language: 'bash', value: result.output });
+            }
+            if (result.error) {
+              resultMessageContent.push({ type: 'code', language: 'bash', value: `ERROR: ${result.error}` });
+            }
+
+            const resultMessage = {
+              role: 'model',
+              content: { action: 'reply', parameters: { content: resultMessageContent } }
+            };
+            setHistory(prev => [...prev, resultMessage]);
+
+            // Now, send the result back to the AI for the next turn
+            await sendToolResult(command, args, result);
+
+          } catch (error) {
+            console.error('Failed to execute command:', error);
+            const errorMessage = {
+              role: 'model',
+              content: {
+                action: 'reply',
+                parameters: {
+                  content: [{ type: 'text', value: `An error occurred while trying to run the command: ${error.message}` }]
+                }
+              }
+            };
+            setHistory(prev => [...prev, errorMessage]);
+          }
+
         } else if (parsedData.type === 'final') {
-          const finalAction = parsedData.payload;
-          setHistory(prev => [...prev, { role: 'model', content: finalAction }]);
+          // The stream is over. The 'final' payload contains the original actions
+          // that the model intended. We've already processed them (reply, command)
+          // and added their results to history. So, we don't need to add the
+          // final payload to the history again, as it would be redundant.
+          // Just close the stream and finalize the state.
           setModelResponse(null);
           setIsLoading(false);
-          eventSource.close();
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
         }
       } catch (error) {
         console.error("Failed to parse message data", error);
       }
     };
 
-    eventSource.onerror = (err) => {
+    eventSourceRef.current.onerror = (err) => {
       console.error("EventSource failed:", err);
       setIsLoading(false);
-      eventSource.close();
+      eventSourceRef.current.close();
+      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { text: "Sorry, an error occurred with the stream." } } }]);
+    };
+  };
+
+  const sendToolResult = async (command, args, result) => {
+    if (!currentSessionId) {
+      console.error("Cannot send tool result without a session ID.");
+      return;
+    }
+    
+    setIsLoading(true);
+    setModelResponse('');
+
+    const toolResultText = `TOOL_OUTPUT:\nCommand: ${command} ${args.join(' ')}\nStatus: ${result.success ? 'Success' : 'Failure'}\nOutput:\n${result.output}\nError:\n${result.error || ''}`;
+
+    // Add tool output to history visually
+    setHistory(prev => [...prev, { role: 'user', content: `(Sent tool output to AI)\n${result.output || result.error}` }]);
+
+    const platform = navigator.platform;
+    const userId = 'temp-user-id'; // Temporary user ID
+    const url = `${API_URL}/gemini/conversation-stream?message=${encodeURIComponent(toolResultText)}&sessionId=${currentSessionId}&userId=${userId}&platform=${platform}`;
+    
+    eventSourceRef.current = new EventSource(url);
+    let streamingText = '';
+    let accumulatedContent = [];
+
+    eventSourceRef.current.onmessage = (event) => {
+       try {
+        const parsedData = JSON.parse(event.data);
+
+        if (parsedData.type === 'error') {
+          console.error("Server-side error:", parsedData.payload);
+          let errorMessage = `An error occurred: ${parsedData.payload.message}`;
+          if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
+            errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
+          }
+          setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
+          handleStop(false); // Auto-stop, not user initiated
+          return;
+        }
+        
+        // We don't expect session_id or command_exec here, just reply chunks
+        if (parsedData.type === 'text_chunk') {
+          streamingText += parsedData.payload;
+          
+          const lastItem = accumulatedContent[accumulatedContent.length - 1];
+          if (lastItem && lastItem.type === 'text') {
+            lastItem.value = streamingText;
+          } else {
+            accumulatedContent.push({ type: 'text', value: streamingText });
+          }
+          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+
+        } else if (parsedData.type === 'code_chunk') {
+          streamingText = ''; // Reset for next text block
+          accumulatedContent.push(parsedData.payload);
+          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+
+        } else if (parsedData.type === 'final') {
+          // Similar to the above, we just finalize the state here.
+          // The AI's response to the tool output has been streamed and displayed.
+          // We add the final action object to the history so the conversation flow is saved.
+          setHistory(prev => [...prev, { role: 'model', content: parsedData.payload }]);
+          setModelResponse(null);
+          setIsLoading(false);
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
+        }
+      } catch (error) {
+        console.error("Failed to parse message data", error);
+      }
+    };
+    
+    eventSourceRef.current.onerror = (err) => {
+      console.error("EventSource failed:", err);
+      setIsLoading(false);
+      eventSourceRef.current.close();
       setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { text: "Sorry, an error occurred with the stream." } } }]);
     };
   };
 
   const handleNewConversation = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
     setCurrentSessionId(null);
     setHistory([]);
     window.history.pushState({}, '', '/');
@@ -435,6 +605,15 @@ function App() {
 
       return null;
     }
+
+    if (action === 'runCommand') {
+      return (
+        <div className="action-request">
+          <strong>Action Planned:</strong> Execute Command
+          <pre>{`> ${parameters.command} ${parameters.args.join(' ')}`}</pre>
+        </div>
+      );
+    }
     
     return (
       <div key={index} className="turn">
@@ -470,7 +649,16 @@ function App() {
                         case 'user':
                             return <div key={index} className="message user"><p>{item.content}</p></div>;
                         case 'model':
-                            return <div key={index} className="message model">{renderTurn(item.content, index)}</div>;
+                            // We need to handle the array of actions here
+                            const content = item.content;
+                            if (Array.isArray(content)) {
+                                return content.map((action, actionIndex) => (
+                                    <div key={`${index}-${actionIndex}`} className="message model">
+                                        {renderTurn(action, `${index}-${actionIndex}`)}
+                                    </div>
+                                ));
+                            }
+                            return <div key={index} className="message model">{renderTurn(content, index)}</div>;
                         default:
                             return null;
                     }
@@ -487,7 +675,11 @@ function App() {
                     placeholder={isLoading ? "Working..." : "Ask Deskina to do something..."}
                     disabled={isLoading}
                 />
-                <button type="submit" disabled={isLoading}>Send</button>
+                {isLoading ? (
+                  <button type="button" onClick={() => handleStop(true)} className="stop-button">Stop</button>
+                ) : (
+                  <button type="submit" disabled={isLoading}>Send</button>
+                )}
             </form>
         </main>
     </div>
