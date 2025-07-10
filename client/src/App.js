@@ -193,7 +193,7 @@ const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation
     <button onClick={onNewConversation} className="new-chat-button">
       + New Chat
     </button>
-    <nav>
+    <nav className="sessions-list">
       <ul>
         {sessions.map((session) => (
           <li 
