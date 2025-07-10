@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@google/genai": "^1.8.0",
+    "@langchain/community": "^0.3.48",
+    "@langchain/core": "^0.3.62",
+    "@langchain/google-genai": "^0.2.14",
     "@nestjs-modules/mailer": "^2.0.2",
     "@nestjs/common": "^10.0.0",
     "@nestjs/config": "^4.0.2",
@@ -34,6 +37,7 @@
     "cuid": "^3.0.0",
     "dotenv": "^17.2.0",
     "handlebars": "^4.7.8",
+    "langchain": "^0.3.29",
     "nodemailer": "^7.0.5",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
