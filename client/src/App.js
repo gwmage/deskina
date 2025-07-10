@@ -140,22 +140,37 @@ const AuthPage = ({ onLoginSuccess }) => {
   const renderSignupForm = () => {
     if (step === 1) {
       return (
-        <form onSubmit={handleRequestCode}>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" required disabled={isLoading} />
-          <button type="submit" disabled={isLoading}>
-            {isLoading ? 'Sending...' : 'Get Verification Code'}
+        <form onSubmit={handleRequestCode} className="auth-form">
+          <div className="form-group">
+            <label htmlFor="signup-email">Email</label>
+            <input id="signup-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required disabled={isLoading} />
+          </div>
+          <button type="submit" className="auth-button" disabled={isLoading}>
+            {isLoading ? 'Sending Code...' : 'Get Verification Code'}
           </button>
         </form>
       );
     }
     return (
-      <form onSubmit={handleSignupSubmit}>
-        <input type="email" value={email} disabled placeholder="Email" />
-        <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Verification Code" required disabled={isLoading} />
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" required disabled={isLoading} />
-        <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Confirm Password" required disabled={isLoading} />
-        <button type="submit" disabled={isLoading}>
-          {isLoading ? 'Signing Up...' : 'Sign Up'}
+      <form onSubmit={handleSignupSubmit} className="auth-form">
+        <div className="form-group">
+          <label htmlFor="signup-email-disabled">Email</label>
+          <input id="signup-email-disabled" type="email" value={email} disabled placeholder="you@example.com" />
+        </div>
+        <div className="form-group">
+          <label htmlFor="code">Verification Code</label>
+          <input id="code" type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Enter code" required disabled={isLoading} />
+        </div>
+        <div className="form-group">
+          <label htmlFor="signup-password">Password</label>
+          <input id="signup-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required disabled={isLoading} />
+        </div>
+        <div className="form-group">
+          <label htmlFor="confirm-password">Confirm Password</label>
+          <input id="confirm-password" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" required disabled={isLoading} />
+        </div>
+        <button type="submit" className="auth-button" disabled={isLoading}>
+          {isLoading ? 'Creating Account...' : 'Sign Up'}
         </button>
       </form>
     );
@@ -163,25 +178,51 @@ const AuthPage = ({ onLoginSuccess }) => {
   
   return (
     <div className="auth-container">
-      <div className="auth-form">
-        <h1>Hello, Deskina</h1>
-        <h2>{isLogin ? 'Login' : 'Sign Up'}</h2>
+      <div className="auth-card">
+        <div className="auth-logo">
+          {/* A simple placeholder logo */}
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2L2 7V17L12 22L22 17V7L12 2Z" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M2 7L12 12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M22 7L12 12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M12 22V12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M7 4.5L17 9.5" stroke="var(--accent-color)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+        <h2>{isLogin ? 'Welcome Back' : 'Create an Account'}</h2>
         
         {isLogin ? (
-          <form onSubmit={handleLoginSubmit}>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" required disabled={isLoading} />
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" required disabled={isLoading} />
-            <button type="submit" disabled={isLoading}>
+          <form onSubmit={handleLoginSubmit} className="auth-form">
+            <div className="form-group">
+              <label htmlFor="email">Email</label>
+              <input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required disabled={isLoading} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="password">Password</label>
+              <input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required disabled={isLoading} />
+            </div>
+            <button type="submit" className="auth-button" disabled={isLoading}>
               {isLoading ? 'Logging In...' : 'Login'}
             </button>
           </form>
         ) : renderSignupForm()}
 
-        {error && <p className="error">{error}</p>}
-        {message && <p className="message">{message}</p>}
-        <button onClick={() => { setIsLogin(!isLogin); resetForm(); }} className="toggle-auth">
-          {isLogin ? 'Need an account? Sign Up' : 'Have an account? Login'}
-        </button>
+        {error && <p className="auth-error">{error}</p>}
+        {message && <p className="auth-message">{message}</p>}
+
+        <div className="auth-toggle">
+          {isLogin ? (
+            <>
+              Don't have an account?{' '}
+              <button onClick={() => { setIsLogin(!isLogin); resetForm(); }}>Sign Up</button>
+            </>
+          ) : (
+            <>
+              Already have an account?{' '}
+              <button onClick={() => { setIsLogin(!isLogin); resetForm(); }}>Login</button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

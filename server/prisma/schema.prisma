@@ -39,8 +39,9 @@ model Conversation {
   session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   role       String // "user" or "model"
   content    String   @db.Text
-  embedding  Unsupported("vector(768)")? 
+  imageBase64 String? @db.Text
+  // embedding  Unsupported("vector(768)")? 
   createdAt  DateTime @default(now())
 
   @@index([sessionId])
-} 
+}
