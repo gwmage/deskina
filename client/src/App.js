@@ -331,7 +331,9 @@ function App() {
 
     } catch (error) {
       console.error(`Error fetching history for session ${sessionIdToFetch}:`, error);
-      setHistory([]); // Clear history on a major fetch error
+      // For new chats, an error is expected. Reset both history and total.
+      setHistory([]); 
+      setTotalConversations(0);
     } finally {
       setIsLoading(false);
       setIsHistoryLoading(false);
@@ -594,9 +596,14 @@ function App() {
   };
 
   const handleNewConversation = () => {
-    handleStop(false);
-    setCurrentSessionId(null);
-    window.history.pushState({}, '', '/');
+    setCurrentSessionId(`temp-${Date.now()}`);
+    setHistory([]);
+    setTotalConversations(0);
+    setConversationPage(1);
+    setImageBase64('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // Reset file input
+    }
   };
 
   const handleSessionClick = (sessionId) => {
