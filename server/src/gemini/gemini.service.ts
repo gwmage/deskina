@@ -51,6 +51,27 @@ export class GeminiService implements OnModuleInit {
     imageBase64?: string,
   ) {
     let currentSessionId = sessionId;
+    let session = null;
+
+    // The user was right. The frontend sends a temporary ID for new chats.
+    // We must first verify if the session exists in the database.
+    if (currentSessionId) {
+      session = await (this.prisma as any).session.findUnique({
+        where: { id: currentSessionId, userId: userId },
+      });
+    }
+
+    // If the session does not exist (ID was temporary/fake/null), create a new one.
+    // This is the correct logic that was missing.
+    if (!session) {
+      const newSession = await this.sessionService.create(
+        message.substring(0, 30),
+        userId,
+      );
+      currentSessionId = newSession.id;
+      // Send the *real* session ID back to the client.
+      yield { type: 'session_id', payload: currentSessionId };
+    }
 
     try {
       const systemPrompt = this.getSystemPrompt(platform);
@@ -59,28 +80,25 @@ export class GeminiService implements OnModuleInit {
         // ... more safety settings
       ];
 
-      if (!currentSessionId) {
-        const newSession = await this.sessionService.create(message.substring(0, 30), userId);
-        currentSessionId = newSession.id;
-        yield { type: 'session_id', payload: currentSessionId };
-      }
-
-      await this.prisma.conversation.create({
+      // Now `currentSessionId` is guaranteed to be valid.
+      // We use `sessionId` directly to bypass the incorrect type inferences.
+      await (this.prisma as any).conversation.create({
         data: {
           sessionId: currentSessionId,
           role: 'user',
           content: message,
           imageBase64: imageBase64,
-        } as any,
+        },
       });
 
-      const history = await this.prisma.conversation.findMany({
+      // Fetch history using the now-guaranteed-valid sessionId.
+      const history: any[] = await (this.prisma as any).conversation.findMany({
         where: { sessionId: currentSessionId },
         orderBy: { createdAt: 'asc' },
         take: 20,
-      } as any);
+      });
 
-      const chatHistory = history.map((conv: any) => {
+      const chatHistory = history.map((conv) => {
         const parts: Part[] = [];
         if (conv.content) parts.push({ text: conv.content });
         if (conv.role === 'user' && conv.imageBase64) {
@@ -113,12 +131,26 @@ export class GeminiService implements OnModuleInit {
         yield { type: 'text_chunk', payload: chunkText };
       }
       
-      await this.prisma.conversation.create({
-        data: { sessionId: currentSessionId, role: 'model', content: rawResponseText } as any,
+      // 1. Save the raw JSON string from the model to the database.
+      await (this.prisma as any).conversation.create({
+        data: {
+          sessionId: currentSessionId,
+          role: 'model',
+          content: rawResponseText, // The raw JSON string
+        },
       });
 
-      const finalPayload = JSON.parse(rawResponseText);
-      yield { type: 'final', payload: finalPayload };
+      // 2. Parse the response to be sent to the client.
+      const parsedPayload = JSON.parse(rawResponseText);
+
+      // 3. Restore the original, consistent message structure for the client.
+      // This ensures the client's rendering logic works as it did before.
+      const finalClientPayload = {
+        action: parsedPayload.action || 'reply', // Default to 'reply' if no action
+        parameters: parsedPayload.parameters || parsedPayload, // Use the whole payload as params if needed
+      };
+
+      yield { type: 'final', payload: finalClientPayload };
 
     } catch (error) {
       this.logger.error('Error in generateResponse:', error.stack);
@@ -130,21 +162,20 @@ export class GeminiService implements OnModuleInit {
       }
       
       if (currentSessionId) {
-        // Create the standard reply format for the error message
+        // Save error message to the database
         const errorContent = {
           action: 'reply',
           parameters: {
-            content: [{ type: 'text', value: `🤖 ${userFriendlyMessage}` }]
-          }
+            content: [{ type: 'text', value: `🤖 ${userFriendlyMessage}` }],
+          },
         };
 
-        await this.prisma.conversation.create({
+        await (this.prisma as any).conversation.create({
           data: {
             sessionId: currentSessionId,
             role: 'model',
-            // Store the structured error message as a JSON string
             content: JSON.stringify(errorContent),
-          } as any,
+          },
         });
       }
 

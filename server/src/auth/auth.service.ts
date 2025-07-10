@@ -24,24 +24,25 @@ export class AuthService {
     }
 
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const hashedCode = await bcrypt.hash(verificationCode, 10); // Hash the code for security
+    const hashedCode = await bcrypt.hash(verificationCode, 10);
 
     if (existingUser) {
       await this.prisma.user.update({
         where: { email },
-        data: { verificationToken: hashedCode }, // Store the hashed code
+        data: { verificationToken: hashedCode },
       });
     } else {
+      // Create a user but without a password, as it's not provided yet.
       await this.prisma.user.create({
-        data: { email, verificationToken: hashedCode },
+        data: { email, verificationToken: hashedCode, password: '' },
       });
     }
 
-    await this.emailService.sendVerificationEmail(email, verificationCode); // Send the plain code
+    await this.emailService.sendVerificationEmail(email, verificationCode);
     return { message: 'Verification code sent. Please check your email.' };
   }
 
-  async completeSignup(dto: CompleteSignupDto): Promise<{ accessToken: string }> {
+  async completeSignup(dto: CompleteSignupDto): Promise<{ accessToken: string; userId: string }> {
     const { email, code, password } = dto;
 
     const user = await this.prisma.user.findUnique({ where: { email } });
@@ -68,10 +69,10 @@ export class AuthService {
 
     const payload = { email: updatedUser.email, sub: updatedUser.id };
     const accessToken = this.jwtService.sign(payload);
-    return { accessToken };
+    return { accessToken, userId: updatedUser.id };
   }
   
-  async login(loginDto: CreateAuthDto): Promise<{ accessToken: string }> {
+  async login(loginDto: CreateAuthDto): Promise<{ accessToken: string; userId: string }> {
     const { email, password } = loginDto;
     const user = await this.prisma.user.findUnique({ where: { email } });
 
@@ -86,6 +87,6 @@ export class AuthService {
 
     const payload = { email: user.email, sub: user.id };
     const accessToken = this.jwtService.sign(payload);
-    return { accessToken };
+    return { accessToken, userId: user.id };
   }
 }

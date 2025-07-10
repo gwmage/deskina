@@ -1,13 +1,16 @@
-import { Controller, Post, Body, Res, Headers } from '@nestjs/common';
+import { Controller, Post, Body, Res, UseGuards, Request } from '@nestjs/common';
 import { GeminiService } from './gemini.service';
 import { Response } from 'express';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('gemini')
 export class GeminiController {
   constructor(private readonly geminiService: GeminiService) {}
 
   @Post('conversation-stream')
+  @UseGuards(JwtAuthGuard) // Apply the JWT guard to protect this endpoint
   async conversationStream(
+    @Request() req, // Get the whole request object
     @Body()
     body: {
       message: string;
@@ -15,13 +18,15 @@ export class GeminiController {
       platform: string;
       imageBase64?: string;
     },
-    @Headers('x-user-id') userId: string,
     @Res() res: Response,
   ) {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
+
+    // Safely get userId from the request object, populated by JwtAuthGuard
+    const userId = req.user.id;
 
     try {
       const stream = this.geminiService.generateResponse(
