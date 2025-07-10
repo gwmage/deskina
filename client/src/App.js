@@ -317,11 +317,15 @@ function App() {
         }
         return c; // For user roles, content is just a string
       });
+
+      // The server sends messages in descending order (newest first) for pagination.
+      // We must reverse the array to display them in chronological order (oldest first).
+      const chronologicalConversations = parsedConversations.reverse();
       
       if (page === 1) {
-        setHistory(parsedConversations);
+        setHistory(chronologicalConversations);
       } else {
-        setHistory(prev => [...parsedConversations, ...prev]);
+        setHistory(prev => [...chronologicalConversations, ...prev]);
       }
       setTotalConversations(data.totalConversations);
 
@@ -334,35 +338,35 @@ function App() {
     }
   }, [apiFetch]);
   
+  const loadSessions = useCallback(async () => {
+    try {
+      const response = await apiFetch(`${API_URL}/session`);
+      if (!response || !response.ok) throw new Error('Failed to fetch sessions');
+      const data = await response.json();
+      const fetchedSessions = data.sessions || [];
+      setSessions(fetchedSessions);
+
+      const urlSessionId = new URLSearchParams(window.location.search).get('sessionId');
+      
+      if (urlSessionId) {
+        setCurrentSessionId(urlSessionId);
+      } else if (fetchedSessions.length > 0) {
+        const latestSessionId = fetchedSessions[0].id;
+        setCurrentSessionId(latestSessionId);
+        window.history.replaceState({ sessionId: latestSessionId }, '', `?sessionId=${latestSessionId}`);
+      }
+    } catch (error) {
+      console.error("Error loading sessions:", error);
+      setSessions([]);
+    }
+  }, [apiFetch]);
+
   // Effect 1: Load sessions list and determine the initial session to display.
   useEffect(() => {
-    if (!authToken) return;
-
-    const loadSessions = async () => {
-      try {
-        const response = await apiFetch(`${API_URL}/session`);
-        if (!response.ok) throw new Error('Failed to fetch sessions');
-        const data = await response.json();
-        const fetchedSessions = data.sessions || [];
-        setSessions(fetchedSessions);
-
-        const urlSessionId = new URLSearchParams(window.location.search).get('sessionId');
-        
-        if (urlSessionId) {
-          setCurrentSessionId(urlSessionId);
-        } else if (fetchedSessions.length > 0) {
-          const latestSessionId = fetchedSessions[0].id;
-          setCurrentSessionId(latestSessionId);
-          window.history.replaceState({ sessionId: latestSessionId }, '', `?sessionId=${latestSessionId}`);
-        }
-      } catch (error) {
-        console.error("Error loading sessions:", error);
-        setSessions([]);
-      }
-    };
-
-    loadSessions();
-  }, [authToken, apiFetch]);
+    if (authToken) {
+      loadSessions();
+    }
+  }, [authToken, loadSessions]);
 
   // Effect 2: Fetch the conversation history whenever the currentSessionId changes.
   useEffect(() => {
@@ -439,24 +443,14 @@ function App() {
     const { signal } = abortControllerRef.current;
 
     try {
-      const response = await fetch(url, {
+      const response = await apiFetch(url, { // Use the common apiFetch function
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${authToken}`,
-        },
         body: JSON.stringify(body),
         signal,
       });
 
-      if (response.status === 401) {
-        setAuthToken(null);
-        localStorage.removeItem('authToken');
-        return;
-      }
-
-      if (!response.body) {
-        throw new Error("Response body is missing");
+      if (!response || !response.body) {
+        throw new Error('The response has no body.');
       }
 
       const reader = response.body.getReader();
