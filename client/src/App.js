@@ -219,8 +219,10 @@ function App() {
   const [modelResponse, setModelResponse] = useState('');
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [imageBase64, setImageBase64] = useState('');
   const chatEndRef = useRef(null);
-  const eventSourceRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const markdownComponents = {
       code: CodeBlock,
@@ -249,13 +251,26 @@ function App() {
       const response = await apiFetch(`${API_URL}/session/${sessionIdToFetch}`);
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
-      setHistory(data.conversations.map(c => ({
-        role: c.role,
-        content: c.role === 'model' ? JSON.parse(c.content) : c.content
-      })));
+      
+      const parsedConversations = data.conversations.map(c => {
+        if (c.role === 'model') {
+          try {
+            // Attempt to parse the content, which should be a JSON string of an array of actions
+            return { ...c, content: JSON.parse(c.content) };
+          } catch (e) {
+            console.warn(`Failed to parse model content for session ${sessionIdToFetch}. Content:`, c.content, e);
+            // If parsing fails, return a user-friendly error message within the turn itself
+            return { ...c, content: [{ action: 'reply', parameters: { content: [{ type: 'text', value: `[Error displaying this message: Invalid format]`}] } }] };
+          }
+        }
+        return c; // For user roles, content is just a string
+      });
+
+      setHistory(parsedConversations);
+
     } catch (error) {
       console.error(`Error fetching history for session ${sessionIdToFetch}:`, error);
-      setHistory([]); // Clear history on error
+      setHistory([]); // Clear history on a major fetch error
     } finally {
       setIsLoading(false);
     }
@@ -295,9 +310,9 @@ function App() {
   }, [history, modelResponse]);
 
   const handleStop = (isUserInitiated = false) => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
     setIsLoading(false);
     setModelResponse(null);
@@ -306,8 +321,148 @@ function App() {
     }
   };
 
+  const handleImageChange = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // result includes "data:image/png;base64," prefix, which we need to remove
+        const base64String = reader.result.split(',')[1];
+        setImageBase64(base64String);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setImageBase64('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // Reset file input
+    }
+  };
+
+  const streamResponse = async (url, body) => {
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+
+      if (response.status === 401) {
+        setAuthToken(null);
+        localStorage.removeItem('authToken');
+        return;
+      }
+
+      if (!response.body) {
+        throw new Error("Response body is missing");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedData = '';
+      
+      let streamingText = '';
+      let accumulatedContent = [];
+
+      const processData = async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // Stream has ended. We don't set isLoading to false here because
+            // the 'final' message from the stream will handle that.
+            break;
+          }
+
+          accumulatedData += decoder.decode(value, { stream: true });
+          const lines = accumulatedData.split('\n');
+          accumulatedData = lines.pop(); // Keep the last, possibly incomplete, line
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const jsonString = line.substring(6);
+              try {
+                const parsedData = JSON.parse(jsonString);
+
+                if (parsedData.type === 'error') {
+                  console.error("Server-side error:", parsedData.payload);
+                  let errorMessage = `An error occurred: ${parsedData.payload.message}`;
+                  if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
+                    errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
+                  }
+                  setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
+                  handleStop(false);
+                  return; // Stop processing on error
+                }
+
+                if (parsedData.type === 'session_id') {
+                  const newSessionId = parsedData.payload;
+                  if (newSessionId !== currentSessionId) {
+                      setCurrentSessionId(newSessionId);
+                      window.history.pushState({ sessionId: newSessionId }, '', `?sessionId=${newSessionId}`);
+                  }
+                } else if (parsedData.type === 'text_chunk') {
+                  streamingText += parsedData.payload;
+                  const lastItem = accumulatedContent[accumulatedContent.length - 1];
+                  if (lastItem && lastItem.type === 'text') {
+                    lastItem.value = streamingText;
+                  } else {
+                    accumulatedContent.push({ type: 'text', value: streamingText });
+                  }
+                  setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+                } else if (parsedData.type === 'code_chunk') {
+                  streamingText = ''; // Reset for next text block
+                  accumulatedContent.push(parsedData.payload);
+                  setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
+                } else if (parsedData.type === 'command_exec') {
+                  const { command, args } = parsedData.payload;
+                  const commandExecutionMessage = { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🚀 Executing: \`${command} ${args.join(' ')}\`...` }] } } };
+                  setHistory(prev => [...prev, commandExecutionMessage]);
+                  setModelResponse(null);
+                  const result = await window.electron.runCommand(command, args);
+                  const resultMessageContent = [{ type: 'text', value: result.success ? '✅ Command finished successfully.' : '❌ Command failed.' }];
+                  if (result.output) resultMessageContent.push({ type: 'code', language: 'bash', value: result.output });
+                  if (result.error) resultMessageContent.push({ type: 'code', language: 'bash', value: `ERROR: ${result.error}` });
+                  const resultMessage = { role: 'model', content: { action: 'reply', parameters: { content: resultMessageContent } } };
+                  setHistory(prev => [...prev, resultMessage]);
+                  await sendToolResult(command, args, result);
+                } else if (parsedData.type === 'final') {
+                  setHistory(prev => [...prev, { role: 'model', content: parsedData.payload }]);
+                  setModelResponse(null);
+                  setIsLoading(false);
+                }
+              } catch (e) {
+                console.error('Failed to parse JSON from stream:', e, jsonString);
+              }
+            }
+          }
+        }
+      };
+      await processData();
+
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.log('Fetch aborted by user.');
+        // The handleStop function takes care of UI updates
+        return; 
+      }
+      
+      console.error("Streaming failed:", error);
+      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: "Sorry, an error occurred with the connection." }] } } }]);
+      setIsLoading(false);
+    }
+  };
+
   const executeTurn = async () => {
-    if (!prompt.trim()) return;
+    if ((!prompt.trim() && !imageBase64) || !authToken) return;
 
     const currentPromptText = prompt;
     setHistory(prev => [...prev, { role: 'user', content: currentPromptText }]);
@@ -315,147 +470,18 @@ function App() {
     setIsLoading(true);
     setModelResponse('');
 
-    const platform = navigator.platform;
-    const userId = 'temp-user-id'; // Temporary user ID
-    let url = `${API_URL}/gemini/conversation-stream?message=${encodeURIComponent(currentPromptText)}&userId=${userId}&platform=${platform}`;
-    if (currentSessionId) {
-      url += `&sessionId=${currentSessionId}`;
-    }
-
-    eventSourceRef.current = new EventSource(url);
-    let streamingText = '';
-    let accumulatedContent = [];
-
-    eventSourceRef.current.onmessage = async (event) => {
-      try {
-        const parsedData = JSON.parse(event.data);
-        
-        if (parsedData.type === 'error') {
-          console.error("Server-side error:", parsedData.payload);
-          let errorMessage = `An error occurred: ${parsedData.payload.message}`;
-          if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
-            errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
-          }
-          setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
-          handleStop(false); // Auto-stop, not user initiated
-          return;
-        }
-
-        if (parsedData.type === 'session_id') {
-            const newSessionId = parsedData.payload;
-            if (newSessionId !== currentSessionId) {
-                setCurrentSessionId(newSessionId);
-                window.history.pushState({ sessionId: newSessionId }, '', `?sessionId=${newSessionId}`);
-                
-                const refetchSessions = async () => {
-                    try {
-                        const response = await apiFetch(`${API_URL}/session`);
-                        if (response && response.ok) {
-                            const data = await response.json();
-                            setSessions(data);
-                        }
-                    } catch (error) {
-                        console.error("Error refetching sessions:", error);
-                    }
-                };
-                refetchSessions();
-            }
-        } else if (parsedData.type === 'text_chunk') {
-          streamingText += parsedData.payload;
-          
-          const lastItem = accumulatedContent[accumulatedContent.length - 1];
-          if (lastItem && lastItem.type === 'text') {
-            lastItem.value = streamingText;
-          } else {
-            accumulatedContent.push({ type: 'text', value: streamingText });
-          }
-          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-
-        } else if (parsedData.type === 'code_chunk') {
-          streamingText = ''; // Reset for next text block
-          accumulatedContent.push(parsedData.payload);
-          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-
-        } else if (parsedData.type === 'command_exec') {
-          // Command execution is a blocking action for the stream
-          const { command, args } = parsedData.payload;
-          
-          // Add a message to history indicating the command is about to run
-          const commandExecutionMessage = {
-            role: 'model',
-            content: {
-              action: 'reply',
-              parameters: {
-                content: [{ type: 'text', value: `🚀 Executing: \`${command} ${args.join(' ')}\`...` }]
-              }
-            }
-          };
-          setHistory(prev => [...prev, commandExecutionMessage]);
-          setModelResponse(null); // Clear any streaming response
-
-          try {
-            // Execute the command via Electron's main process
-            const result = await window.electron.runCommand(command, args);
-            
-            // Create a result message to show the user
-            const resultMessageContent = [
-              { type: 'text', value: result.success ? '✅ Command finished successfully.' : '❌ Command failed.' }
-            ];
-            
-            if (result.output) {
-              resultMessageContent.push({ type: 'code', language: 'bash', value: result.output });
-            }
-            if (result.error) {
-              resultMessageContent.push({ type: 'code', language: 'bash', value: `ERROR: ${result.error}` });
-            }
-
-            const resultMessage = {
-              role: 'model',
-              content: { action: 'reply', parameters: { content: resultMessageContent } }
-            };
-            setHistory(prev => [...prev, resultMessage]);
-
-            // Now, send the result back to the AI for the next turn
-            await sendToolResult(command, args, result);
-
-          } catch (error) {
-            console.error('Failed to execute command:', error);
-            const errorMessage = {
-              role: 'model',
-              content: {
-                action: 'reply',
-                parameters: {
-                  content: [{ type: 'text', value: `An error occurred while trying to run the command: ${error.message}` }]
-                }
-              }
-            };
-            setHistory(prev => [...prev, errorMessage]);
-          }
-
-        } else if (parsedData.type === 'final') {
-          // The stream is over. The 'final' payload contains the original actions
-          // that the model intended. We've already processed them (reply, command)
-          // and added their results to history. So, we don't need to add the
-          // final payload to the history again, as it would be redundant.
-          // Just close the stream and finalize the state.
-          setModelResponse(null);
-          setIsLoading(false);
-          if (eventSourceRef.current) {
-            eventSourceRef.current.close();
-            eventSourceRef.current = null;
-          }
-        }
-      } catch (error) {
-        console.error("Failed to parse message data", error);
-      }
+    const body = {
+      userId: 'temp-user-id', // Temporary user ID
+      message: currentPromptText,
+      sessionId: currentSessionId,
+      platform: navigator.platform,
+      imageBase64: imageBase64,
     };
+    
+    // Clear image after sending
+    handleRemoveImage();
 
-    eventSourceRef.current.onerror = (err) => {
-      console.error("EventSource failed:", err);
-      setIsLoading(false);
-      eventSourceRef.current.close();
-      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { text: "Sorry, an error occurred with the stream." } } }]);
-    };
+    await streamResponse(`${API_URL}/gemini/conversation-stream`, body);
   };
 
   const sendToolResult = async (command, args, result) => {
@@ -468,79 +494,20 @@ function App() {
     setModelResponse('');
 
     const toolResultText = `TOOL_OUTPUT:\nCommand: ${command} ${args.join(' ')}\nStatus: ${result.success ? 'Success' : 'Failure'}\nOutput:\n${result.output}\nError:\n${result.error || ''}`;
-
-    // Add tool output to history visually
     setHistory(prev => [...prev, { role: 'user', content: `(Sent tool output to AI)\n${result.output || result.error}` }]);
 
-    const platform = navigator.platform;
-    const userId = 'temp-user-id'; // Temporary user ID
-    const url = `${API_URL}/gemini/conversation-stream?message=${encodeURIComponent(toolResultText)}&sessionId=${currentSessionId}&userId=${userId}&platform=${platform}`;
-    
-    eventSourceRef.current = new EventSource(url);
-    let streamingText = '';
-    let accumulatedContent = [];
-
-    eventSourceRef.current.onmessage = (event) => {
-       try {
-        const parsedData = JSON.parse(event.data);
-
-        if (parsedData.type === 'error') {
-          console.error("Server-side error:", parsedData.payload);
-          let errorMessage = `An error occurred: ${parsedData.payload.message}`;
-          if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
-            errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
-          }
-          setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
-          handleStop(false); // Auto-stop, not user initiated
-          return;
-        }
-        
-        // We don't expect session_id or command_exec here, just reply chunks
-        if (parsedData.type === 'text_chunk') {
-          streamingText += parsedData.payload;
-          
-          const lastItem = accumulatedContent[accumulatedContent.length - 1];
-          if (lastItem && lastItem.type === 'text') {
-            lastItem.value = streamingText;
-          } else {
-            accumulatedContent.push({ type: 'text', value: streamingText });
-          }
-          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-
-        } else if (parsedData.type === 'code_chunk') {
-          streamingText = ''; // Reset for next text block
-          accumulatedContent.push(parsedData.payload);
-          setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-
-        } else if (parsedData.type === 'final') {
-          // Similar to the above, we just finalize the state here.
-          // The AI's response to the tool output has been streamed and displayed.
-          // We add the final action object to the history so the conversation flow is saved.
-          setHistory(prev => [...prev, { role: 'model', content: parsedData.payload }]);
-          setModelResponse(null);
-          setIsLoading(false);
-          if (eventSourceRef.current) {
-            eventSourceRef.current.close();
-            eventSourceRef.current = null;
-          }
-        }
-      } catch (error) {
-        console.error("Failed to parse message data", error);
-      }
+    const body = {
+      userId: 'temp-user-id',
+      message: toolResultText,
+      sessionId: currentSessionId,
+      platform: navigator.platform,
     };
-    
-    eventSourceRef.current.onerror = (err) => {
-      console.error("EventSource failed:", err);
-      setIsLoading(false);
-      eventSourceRef.current.close();
-      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { text: "Sorry, an error occurred with the stream." } } }]);
-    };
+
+    await streamResponse(`${API_URL}/gemini/conversation-stream`, body);
   };
 
   const handleNewConversation = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
+    handleStop(false);
     setCurrentSessionId(null);
     setHistory([]);
     window.history.pushState({}, '', '/');
@@ -675,12 +642,33 @@ function App() {
                     placeholder={isLoading ? "Working..." : "Ask Deskina to do something..."}
                     disabled={isLoading}
                 />
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleImageChange}
+                  style={{ display: 'none' }}
+                  accept="image/png, image/jpeg, image/webp, image/gif"
+                />
+                <button 
+                  type="button" 
+                  onClick={() => fileInputRef.current.click()} 
+                  className="attach-button"
+                  disabled={isLoading}
+                >
+                  📎
+                </button>
                 {isLoading ? (
                   <button type="button" onClick={() => handleStop(true)} className="stop-button">Stop</button>
                 ) : (
                   <button type="submit" disabled={isLoading}>Send</button>
                 )}
             </form>
+            {imageBase64 && (
+              <div className="image-preview">
+                <img src={`data:image/png;base64,${imageBase64}`} alt="Preview" />
+                <button onClick={handleRemoveImage} className="remove-image-button">×</button>
+              </div>
+            )}
         </main>
     </div>
   );
