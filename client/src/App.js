@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './App.css';
@@ -216,11 +216,15 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [history, setHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [modelResponse, setModelResponse] = useState('');
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [conversationPage, setConversationPage] = useState(1);
+  const [totalConversations, setTotalConversations] = useState(0);
   const [imageBase64, setImageBase64] = useState('');
   const chatEndRef = useRef(null);
+  const scrollRef = useRef(null);
   const abortControllerRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -244,11 +248,17 @@ function App() {
     return response;
   }, [authToken]);
 
-  const fetchSessionHistory = useCallback(async (sessionIdToFetch) => {
+  const fetchSessionHistory = useCallback(async (sessionIdToFetch, page = 1) => {
     if (!sessionIdToFetch) return;
-    setIsLoading(true);
+    
+    if (page > 1) {
+      setIsHistoryLoading(true);
+    } else {
+      setIsLoading(true);
+    }
+
     try {
-      const response = await apiFetch(`${API_URL}/session/${sessionIdToFetch}`);
+      const response = await apiFetch(`${API_URL}/session/${sessionIdToFetch}/conversations?page=${page}`);
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
@@ -256,58 +266,100 @@ function App() {
         if (c.role === 'model') {
           try {
             // Attempt to parse the content, which should be a JSON string of an array of actions
-            return { ...c, content: JSON.parse(c.content) };
+            const parsedContent = JSON.parse(c.content);
+            return { ...c, content: parsedContent };
           } catch (e) {
             console.warn(`Failed to parse model content for session ${sessionIdToFetch}. Content:`, c.content, e);
             // If parsing fails, return a user-friendly error message within the turn itself
-            return { ...c, content: [{ action: 'reply', parameters: { content: [{ type: 'text', value: `[Error displaying this message: Invalid format]`}] } }] };
+            return { ...c, content: { action: 'reply', parameters: { content: [{ type: 'text', value: `[Error displaying this message: Invalid format]`}] } } };
           }
         }
         return c; // For user roles, content is just a string
       });
-
-      setHistory(parsedConversations);
+      
+      if (page === 1) {
+        setHistory(parsedConversations);
+      } else {
+        setHistory(prev => [...parsedConversations, ...prev]);
+      }
+      setTotalConversations(data.totalConversations);
 
     } catch (error) {
       console.error(`Error fetching history for session ${sessionIdToFetch}:`, error);
       setHistory([]); // Clear history on a major fetch error
     } finally {
       setIsLoading(false);
+      setIsHistoryLoading(false);
     }
   }, [apiFetch]);
   
-  // Fetch all sessions on initial load
+  // Effect 1: Load sessions list and determine the initial session to display.
   useEffect(() => {
     if (!authToken) return;
-    const fetchSessions = async () => {
+
+    const loadSessions = async () => {
       try {
         const response = await apiFetch(`${API_URL}/session`);
         if (!response.ok) throw new Error('Failed to fetch sessions');
         const data = await response.json();
-        setSessions(data);
+        const fetchedSessions = data.sessions || [];
+        setSessions(fetchedSessions);
+
+        const urlSessionId = new URLSearchParams(window.location.search).get('sessionId');
+        
+        if (urlSessionId) {
+          setCurrentSessionId(urlSessionId);
+        } else if (fetchedSessions.length > 0) {
+          const latestSessionId = fetchedSessions[0].id;
+          setCurrentSessionId(latestSessionId);
+          window.history.replaceState({ sessionId: latestSessionId }, '', `?sessionId=${latestSessionId}`);
+        }
       } catch (error) {
-        console.error("Error fetching sessions:", error);
+        console.error("Error loading sessions:", error);
+        setSessions([]);
       }
     };
-    fetchSessions();
+
+    loadSessions();
   }, [authToken, apiFetch]);
 
-  // Handle session ID from URL on initial load
+  // Effect 2: Fetch the conversation history whenever the currentSessionId changes.
   useEffect(() => {
-    if (!authToken) return;
-    const urlSessionId = new URLSearchParams(window.location.search).get('sessionId');
-    if (urlSessionId && urlSessionId !== currentSessionId) {
-      setCurrentSessionId(urlSessionId);
-      fetchSessionHistory(urlSessionId);
+    if (currentSessionId) {
+      setConversationPage(1); // Reset pagination for the new session
+      fetchSessionHistory(currentSessionId, 1);
+    } else {
+      // When there's no active session (e.g., after clicking "New Chat"), clear the history.
+      setHistory([]);
     }
-    // This effect should only run on auth change or if the initial URL has a session.
-    // We pass fetchSessionHistory in dependency array because it's defined with useCallback.
-  }, [authToken, fetchSessionHistory]);
+  }, [currentSessionId, fetchSessionHistory]);
+
+
+  const beforeHistoryRender = useRef(null);
+  // This layout effect handles scroll positioning.
+  // It's a layout effect to prevent flickering.
+  useLayoutEffect(() => {
+    const chatWindow = scrollRef.current;
+    if (!chatWindow) return;
+
+    // If beforeHistoryRender has a value, it means we're loading more history,
+    // so we adjust the scroll position to keep the user's view stable.
+    if (beforeHistoryRender.current) {
+      const { previousScrollHeight } = beforeHistoryRender.current;
+      chatWindow.scrollTop = chatWindow.scrollHeight - previousScrollHeight;
+      beforeHistoryRender.current = null;
+    } else {
+      // Otherwise, it's an initial load or a new message, so scroll to the bottom.
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+  }, [history]);
   
-  // Scroll to bottom effect
+  // This effect handles smooth scrolling to the bottom while an AI response is streaming.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [history, modelResponse]);
+    if (modelResponse) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [modelResponse]);
 
   const handleStop = (isUserInitiated = false) => {
     if (abortControllerRef.current) {
@@ -509,14 +561,12 @@ function App() {
   const handleNewConversation = () => {
     handleStop(false);
     setCurrentSessionId(null);
-    setHistory([]);
     window.history.pushState({}, '', '/');
   };
 
   const handleSessionClick = (sessionId) => {
     if (sessionId !== currentSessionId) {
       setCurrentSessionId(sessionId);
-      fetchSessionHistory(sessionId);
       window.history.pushState({ sessionId }, '', `?sessionId=${sessionId}`);
     }
   };
@@ -525,6 +575,16 @@ function App() {
     e.preventDefault();
     executeTurn();
   };
+
+  const handleLoadMore = () => {
+    if (!scrollRef.current) return;
+    const nextPage = conversationPage + 1;
+    beforeHistoryRender.current = { previousScrollHeight: scrollRef.current.scrollHeight };
+    fetchSessionHistory(currentSessionId, nextPage);
+    setConversationPage(nextPage);
+  };
+
+  const hasMoreConversations = history.length < totalConversations;
 
   const handleLogout = () => {
     setAuthToken(null);
@@ -547,7 +607,9 @@ function App() {
     const { action, parameters } = turnContent;
 
     if (!action || !parameters) {
-      return <p key={index}>{JSON.stringify(turnContent)}</p>;
+      // It might be a simple string if it's from old history, or malformed.
+      // Let's try to render it as a string.
+      return <ReactMarkdown components={{ code: CodeBlock }} remarkPlugins={[remarkGfm]}>{JSON.stringify(turnContent)}</ReactMarkdown>;
     }
 
     if (action === 'reply') {
@@ -556,7 +618,7 @@ function App() {
         return parameters.content.map((item, i) => {
           const key = `${index}-${i}`;
           if (item.type === 'text') {
-            return <div key={key}><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.value}</ReactMarkdown></div>
+            return <div key={key}><ReactMarkdown components={{code: CodeBlock}} remarkPlugins={[remarkGfm]}>{item.value}</ReactMarkdown></div>
           }
           if (item.type === 'code') {
             return <CodeCopyBlock key={key} language={item.language} code={item.value} />
@@ -574,10 +636,12 @@ function App() {
     }
 
     if (action === 'runCommand') {
+      const commandString = parameters.command || '';
+      const argsString = Array.isArray(parameters.args) ? parameters.args.join(' ') : '';
       return (
         <div className="action-request">
           <strong>Action Planned:</strong> Execute Command
-          <pre>{`> ${parameters.command} ${parameters.args.join(' ')}`}</pre>
+          <pre>{`> ${commandString} ${argsString}`.trim()}</pre>
         </div>
       );
     }
@@ -610,7 +674,14 @@ function App() {
             <header className="App-header">
                 <h1>Deskina AI Agent</h1>
             </header>
-            <div className="chat-window">
+            <div className="chat-window" ref={scrollRef}>
+                {hasMoreConversations && (
+                  <div className="load-more-container">
+                    <button onClick={handleLoadMore} disabled={isHistoryLoading} className="load-more-button">
+                      {isHistoryLoading ? 'Loading...' : 'Load More'}
+                    </button>
+                  </div>
+                )}
                 {history.map((item, index) => {
                     switch (item.role) {
                         case 'user':

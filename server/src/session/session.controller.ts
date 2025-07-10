@@ -1,21 +1,26 @@
-import { Controller, Get, Param, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Param, Headers, Query, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
 import { SessionService } from './session.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
-import { User } from '@prisma/client';
 
-@UseGuards(JwtAuthGuard)
 @Controller('session')
 export class SessionController {
   constructor(private readonly sessionService: SessionService) {}
 
   @Get()
-  findAll(@Req() req: Request) {
-    return this.sessionService.findAll(req.user.id);
+  findAll(
+    @Headers('x-user-id') userId: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ) {
+    return this.sessionService.findAll(userId, page, limit);
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string, @Req() req: Request) {
-    return this.sessionService.findOne(id, req.user.id);
+  @Get(':id/conversations')
+  findOne(
+    @Param('id') id: string, 
+    @Headers('x-user-id') userId: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+  ) {
+    return this.sessionService.findOne(id, userId, page, limit);
   }
 }

@@ -14,31 +14,47 @@ export class SessionService {
     });
   }
 
-  async findAll(userId: string) {
-    return this.prisma.session.findMany({
-      where: { userId },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+  async findAll(userId: string, page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+    const [sessions, totalCount] = await this.prisma.$transaction([
+      this.prisma.session.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        skip,
+        take: limit,
+      }),
+      this.prisma.session.count({ where: { userId } }),
+    ]);
+    
+    return { sessions, totalCount };
   }
 
-  async findOne(id: string, userId: string) {
-    const session = await this.prisma.session.findUnique({
-      where: { id },
-      include: {
-        conversations: {
-          orderBy: {
-            createdAt: 'asc',
-          },
-        },
-      },
-    });
+  async findOne(id: string, userId: string, page = 1, limit = 50) {
+    const skip = (page - 1) * limit;
 
-    if (!session || session.userId !== userId) {
+    const session = await this.prisma.session.findUnique({
+      where: { id, userId },
+    });
+    
+    if (!session) {
       throw new ForbiddenException('You do not have access to this session.');
     }
 
-    return session;
+    const [conversations, totalConversations] = await this.prisma.$transaction([
+      this.prisma.conversation.findMany({
+        where: { sessionId: id },
+        orderBy: {
+          createdAt: 'desc', // Fetch latest messages first for pagination
+        },
+        skip,
+        take: limit,
+      }),
+      this.prisma.conversation.count({ where: { sessionId: id } }),
+    ]);
+
+    // Reverse the order for chronological display on the client
+    return { ...session, conversations: conversations.reverse(), totalConversations };
   }
 }

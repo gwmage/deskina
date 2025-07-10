@@ -269,6 +269,25 @@ body {
   background-color: #d32f2f;
 }
 
+.load-more-container {
+  text-align: center;
+  padding: 10px 0;
+}
+
+.load-more-button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.load-more-button:hover {
+  background-color: #0056b3;
+}
+
 .image-preview {
   position: relative;
   max-width: 150px;
