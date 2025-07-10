@@ -660,6 +660,17 @@ function App() {
   if (!authToken) {
     return <AuthPage onLoginSuccess={handleLoginSuccess} />;
   }
+
+  const renderModelTurn = (turnContent, index) => {
+    const renderedTurn = renderTurn(turnContent, index);
+    if (!renderedTurn) return null; // Don't render anything if the turn is empty
+
+    return (
+      <div key={index} className="message model">
+        {renderedTurn}
+      </div>
+    );
+  };
     
   return (
     <div className="App-container">
@@ -687,22 +698,19 @@ function App() {
                         case 'user':
                             return <div key={index} className="message user"><p>{item.content}</p></div>;
                         case 'model':
-                            // We need to handle the array of actions here
                             const content = item.content;
                             if (Array.isArray(content)) {
-                                return content.map((action, actionIndex) => (
-                                    <div key={`${index}-${actionIndex}`} className="message model">
-                                        {renderTurn(action, `${index}-${actionIndex}`)}
-                                    </div>
-                                ));
+                                return content.map((action, actionIndex) => 
+                                  renderModelTurn(action, `${index}-${actionIndex}`)
+                                );
                             }
-                            return <div key={index} className="message model">{renderTurn(content, index)}</div>;
+                            return renderModelTurn(content, index);
                         default:
                             return null;
                     }
                 })}
                 {isLoading && !modelResponse && <div className="loading-indicator">Thinking...</div>}
-                {modelResponse && <div className="message model">{renderTurn(modelResponse, 'streaming')}</div>}
+                {modelResponse && renderModelTurn(modelResponse, 'streaming')}
                 <div ref={chatEndRef} />
             </div>
             <form onSubmit={handleSubmit} className="message-form">
