@@ -6,7 +6,7 @@ import {
   ChatSession,
 } from '@google/generative-ai';
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from '../prisma.service';
 import { SessionService } from '../session/session.service';
 import { ScriptsService } from '../scripts/scripts.service';
 import { Response } from 'express';

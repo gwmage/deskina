@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, ParseIntPipe, DefaultValuePipe, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Param, Query, ParseIntPipe, DefaultValuePipe, UseGuards, Req, Request } from '@nestjs/common';
 import { SessionService } from './session.service';
 import { AuthGuard } from '@nestjs/passport';
 
@@ -8,24 +8,27 @@ export class SessionController {
   constructor(private readonly sessionService: SessionService) {}
 
   @Get()
-  async findAll(
-    @Req() req,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
-  ) {
-    const userId = req.user.userId;
-    const result = await this.sessionService.findAll(userId, page, limit);
-    return result.sessions; // Return only the sessions array
+  async findAll(@Request() req) {
+    const userId = req.user.id;
+    return this.sessionService.findAllForUser(userId);
   }
 
   @Get(':id/conversations')
-  findOne(
-    @Req() req,
-    @Param('id') id: string, 
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+  async findOne(
+    @Param('id') id: string,
+    @Query('page') page: string = '1',
+    @Query('limit') limit: string = '20',
   ) {
-    const userId = req.user.userId;
-    return this.sessionService.findOne(id, userId, page, limit);
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const conversations = await this.sessionService.getConversationsForClient(
+      id,
+      limitNum,
+      skip,
+    );
+    const total = await this.sessionService.countConversations(id);
+    return { conversations, total };
   }
 }

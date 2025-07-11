@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from '../prisma.service';
 import { Part } from '@google/generative-ai';
 
 @Injectable()
@@ -41,6 +41,25 @@ export class SessionService {
         content,
         imageBase64,
       },
+    });
+  }
+
+  async getConversationsForClient(
+    sessionId: string,
+    limit = 20,
+    skip = 0,
+  ) {
+    return this.prisma.conversation.findMany({
+      where: { sessionId },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+      skip: skip,
+    });
+  }
+
+  async countConversations(sessionId: string): Promise<number> {
+    return this.prisma.conversation.count({
+      where: { sessionId },
     });
   }
 
