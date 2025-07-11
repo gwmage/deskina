@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
+import ReactDiffViewer from 'react-diff-viewer';
 import remarkGfm from 'remark-gfm';
 import './App.css';
 
@@ -48,6 +49,37 @@ const CodeBlock = ({node, inline, className, children, ...props}) => {
   );
 };
 
+const EditFileProposal = ({ proposal, onAccept, onReject }) => {
+  if (!proposal) return null;
+
+  return (
+    <div className="edit-proposal-overlay">
+      <div className="edit-proposal-card">
+        <h3>File Edit Proposal</h3>
+        <p>The AI wants to make the following changes to:</p>
+        <code className="file-path">{proposal.filePath}</code>
+        <div className="diff-container">
+          {proposal.originalContent === 'loading' ? (
+            <p>Loading original file...</p>
+          ) : (
+            <ReactDiffViewer
+              oldValue={proposal.originalContent || ''}
+              newValue={proposal.newContent || ''}
+              splitView={true}
+              showDiffOnly={false}
+            />
+          )}
+        </div>
+        <div className="proposal-actions">
+          <button onClick={onReject} className="reject-button">Reject</button>
+          <button onClick={onAccept} className="accept-button" disabled={proposal.originalContent === 'loading'}>
+            Accept & Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const AuthPage = ({ onLoginSuccess }) => {
   const [isLogin, setIsLogin] = useState(true);
@@ -230,212 +262,175 @@ const AuthPage = ({ onLoginSuccess }) => {
 };
 
 
-const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation, onLogout }) => (
-  <aside className="sidebar">
-    <button onClick={onNewConversation} className="new-chat-button">
-      + New Chat
-    </button>
-    <nav className="sessions-list">
-      <ul>
-        {sessions.map((session) => (
-          <li 
-            key={session.id} 
-            className={session.id === currentSessionId ? 'active' : ''}
-            onClick={() => onSessionClick(session.id)}
-          >
-            {session.title || 'Untitled Conversation'}
-          </li>
-        ))}
-      </ul>
-    </nav>
-    <button onClick={onLogout} className="logout-button">Logout</button>
+const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation, onLogout, isSidebarOpen, onToggle }) => (
+  <aside className={`sidebar ${isSidebarOpen ? 'open' : 'closed'}`}>
+    <div className="sidebar-content">
+      <button onClick={onNewConversation} className="new-chat-button">
+        + New Chat
+      </button>
+      <nav className="sessions-list">
+        <ul>
+          {sessions.map((session) => (
+            <li 
+              key={session.id} 
+              className={session.id === currentSessionId ? 'active' : ''}
+              onClick={() => onSessionClick(session.id)}
+            >
+              {session.title || 'Untitled Conversation'}
+            </li>
+          ))}
+        </ul>
+      </nav>
+      <div className="sidebar-footer">
+        <button onClick={onLogout} className="logout-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+          <span>Logout</span>
+        </button>
+      </div>
+    </div>
   </aside>
 );
 
-// Main App component
-function App() {
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem('authToken'));
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [prompt, setPrompt] = useState('');
-  const [history, setHistory] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
-  const [modelResponse, setModelResponse] = useState('');
+
+const App = () => {
+  const [user, setUser] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
-  const [conversationPage, setConversationPage] = useState(1);
+  const [conversation, setConversation] = useState([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [error, setError] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [imageBase64, setImageBase64] = useState(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
   const [totalConversations, setTotalConversations] = useState(0);
-  const [imageBase64, setImageBase64] = useState('');
-  const chatEndRef = useRef(null);
-  const scrollRef = useRef(null);
-  const abortControllerRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const [fileEditProposal, setFileEditProposal] = useState(null);
 
-  const markdownComponents = {
-      code: CodeBlock,
+  const chatEndRef = useRef(null);
+  const abortControllerRef = new useRef(null);
+  const scrollContainerRef = useRef(null);
+  const prevScrollHeightRef = useRef(null);
+  const inputRef = useRef(null);
+  
+  const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
+
+  // Effect to auto-resize textarea
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto'; // Reset height to recalculate
+      inputRef.current.style.height = `${inputRef.current.scrollHeight}px`;
+    }
+  }, [input]);
+
+  const scrollToBottom = () => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const apiFetch = useCallback(async (url, options = {}) => {
-    const headers = {
-      ...options.headers,
-      'Authorization': `Bearer ${authToken}`,
-      'Content-Type': 'application/json',
-    };
-    const response = await fetch(url, { ...options, headers });
-    if (response.status === 401) {
-      // Handle token expiration
-      setAuthToken(null);
-      localStorage.removeItem('authToken');
-      return;
-    }
-    return response;
-  }, [authToken]);
+  useEffect(scrollToBottom, [conversation]);
 
-  const fetchSessionHistory = useCallback(async (sessionIdToFetch, page = 1) => {
-    if (!sessionIdToFetch) return;
-    
-    if (page > 1) {
-      setIsHistoryLoading(true);
-    } else {
-      setIsLoading(true);
+  useLayoutEffect(() => {
+    if (scrollContainerRef.current && prevScrollHeightRef.current) {
+      scrollContainerRef.current.scrollTop += scrollContainerRef.current.scrollHeight - prevScrollHeightRef.current;
+      prevScrollHeightRef.current = null;
     }
+  }, [conversation]);
 
+  const loadSessions = useCallback(async (token) => {
     try {
-      const response = await apiFetch(`${API_URL}/session/${sessionIdToFetch}/conversations?page=${page}`);
+      const response = await fetch(`${API_URL}/sessions`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error('Failed to load sessions');
+      const data = await response.json();
+      setSessions(data);
+    } catch (err) {
+      console.error('Session loading error:', err);
+      setError('Failed to load your conversations.');
+    }
+  }, []);
+
+  const fetchSessionHistory = useCallback(async (sessionId, currentPage = 1, shouldConcat = false) => {
+    if (!sessionId || sessionId === 'temp') return;
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_URL}/sessions/${sessionId}/conversations?page=${currentPage}&limit=20`, {
+        headers: { 'Authorization': `Bearer ${user.token}` }
+      });
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
-      const parsedConversations = data.conversations.map(c => {
-        if (c.role === 'model') {
-          try {
-            // Attempt to parse the content, which should be a JSON string of an array of actions
-            const parsedContent = JSON.parse(c.content);
-            return { ...c, content: parsedContent };
-          } catch (e) {
-            console.warn(`Failed to parse model content for session ${sessionIdToFetch}. Content:`, c.content, e);
-            // If parsing fails, return a user-friendly error message within the turn itself
-            return { ...c, content: { action: 'reply', parameters: { content: [{ type: 'text', value: `[Error displaying this message: Invalid format]`}] } } };
-          }
+      const formattedHistory = data.conversations.map(turn => {
+        let content;
+        try {
+          content = turn.role === 'model' ? JSON.parse(turn.content).parameters.content : turn.content;
+        } catch (e) {
+          content = turn.content;
         }
-        return c; // For user roles, content is just a string
-      });
+        return { ...turn, content };
+      }).reverse(); // Reverse once after fetching
 
-      // The server sends messages in descending order (newest first) for pagination.
-      // We must reverse the array to display them in chronological order (oldest first).
-      const chronologicalConversations = parsedConversations.reverse();
-      
-      if (page === 1) {
-        setHistory(chronologicalConversations);
-      } else {
-        setHistory(prev => [...chronologicalConversations, ...prev]);
-      }
-      setTotalConversations(data.totalConversations);
-
-    } catch (error) {
-      console.error(`Error fetching history for session ${sessionIdToFetch}:`, error);
-      // For new chats, an error is expected. Reset both history and total.
-      setHistory([]); 
+      setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
+      setTotalConversations(data.total);
+      setHasMore(data.conversations.length > 0 && (currentPage * 20 < data.total));
+      setPage(currentPage);
+    } catch (err) {
+      console.error('Fetch history error:', err);
+      setConversation([]);
       setTotalConversations(0);
+      setHasMore(false);
     } finally {
       setIsLoading(false);
-      setIsHistoryLoading(false);
     }
-  }, [apiFetch]);
+  }, [user]);
+
+  useEffect(() => {
+    const storedToken = localStorage.getItem('accessToken');
+    if (storedToken) {
+      const userData = { token: storedToken };
+      setUser(userData);
+      loadSessions(storedToken);
+    }
+  }, [loadSessions]);
   
-  const loadSessions = useCallback(async () => {
-    try {
-      const response = await apiFetch(`${API_URL}/session`);
-      if (!response || !response.ok) throw new Error('Failed to fetch sessions');
-      const data = await response.json();
-      const fetchedSessions = data.sessions || [];
-      setSessions(fetchedSessions);
-
-      const urlSessionId = new URLSearchParams(window.location.search).get('sessionId');
-      
-      if (urlSessionId) {
-        setCurrentSessionId(urlSessionId);
-      } else if (fetchedSessions.length > 0) {
-        const latestSessionId = fetchedSessions[0].id;
-        setCurrentSessionId(latestSessionId);
-        window.history.replaceState({ sessionId: latestSessionId }, '', `?sessionId=${latestSessionId}`);
-      }
-    } catch (error) {
-      console.error("Error loading sessions:", error);
-      setSessions([]);
-    }
-  }, [apiFetch]);
-
-  // Effect 1: Load sessions list and determine the initial session to display.
-  useEffect(() => {
-    if (authToken) {
-      loadSessions();
-    }
-  }, [authToken, loadSessions]);
-
-  // Effect 2: Fetch the conversation history whenever the currentSessionId changes.
-  useEffect(() => {
-    if (currentSessionId) {
-      setConversationPage(1); // Reset pagination for the new session
-      fetchSessionHistory(currentSessionId, 1);
-    } else {
-      // When there's no active session (e.g., after clicking "New Chat"), clear the history.
-      setHistory([]);
-    }
-  }, [currentSessionId, fetchSessionHistory]);
-
-  // Effect 3: Limit the number of messages in the history to prevent performance issues.
-  useEffect(() => {
-    if (history.length > MAX_MESSAGES) {
-      setHistory(prevHistory => prevHistory.slice(prevHistory.length - MAX_MESSAGES));
-    }
-  }, [history]);
-
-
-  const beforeHistoryRender = useRef(null);
-  // This layout effect handles scroll positioning.
-  // It's a layout effect to prevent flickering.
-  useLayoutEffect(() => {
-    const chatWindow = scrollRef.current;
-    if (!chatWindow) return;
-
-    // If beforeHistoryRender has a value, it means we're loading more history,
-    // so we adjust the scroll position to keep the user's view stable.
-    if (beforeHistoryRender.current) {
-      const { previousScrollHeight } = beforeHistoryRender.current;
-      chatWindow.scrollTop = chatWindow.scrollHeight - previousScrollHeight;
-      beforeHistoryRender.current = null;
-    } else {
-      // Otherwise, it's an initial load or a new message, so scroll to the bottom.
-      chatWindow.scrollTop = chatWindow.scrollHeight;
-    }
-  }, [history]);
-  
-  // This effect handles smooth scrolling to the bottom while an AI response is streaming.
-  useEffect(() => {
-    if (modelResponse) {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [modelResponse]);
-
   const handleStop = (isUserInitiated = false) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
     setIsLoading(false);
-    setModelResponse(null);
     if (isUserInitiated) {
-      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: '🛑 Operation cancelled by user.' }] } } }]);
+      console.log('User initiated stop.');
     }
+  };
+
+  const handleAcceptEdit = async () => {
+    if (!fileEditProposal || !ipcRenderer) return;
+    const { filePath, newContent } = fileEditProposal;
+    const result = await ipcRenderer.invoke('writeFile', { filePath, content: newContent });
+    if (result.success) {
+      setConversation(prev => [...prev, { role: 'system', content: `✅ File "${filePath}" has been updated successfully.` }]);
+    } else {
+      setConversation(prev => [...prev, { role: 'system', content: `❌ Error updating file "${filePath}": ${result.error}` }]);
+    }
+    setFileEditProposal(null);
+  };
+
+  const handleRejectEdit = () => {
+    if (!fileEditProposal) return;
+    const { filePath } = fileEditProposal;
+    setConversation(prev => [...prev, { role: 'system', content: `File edit for "${filePath}" was rejected.` }]);
+    setFileEditProposal(null);
   };
 
   const handleImageChange = (event) => {
     const file = event.target.files[0];
-    if (file) {
+    if (file && file.type.startsWith('image/')) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        // result includes "data:image/png;base64," prefix, which we need to remove
-        const base64String = reader.result.split(',')[1];
+        const base64String = reader.result.replace('data:', '').replace(/^.+,/, '');
+        setImagePreview(reader.result);
         setImageBase64(base64String);
       };
       reader.readAsDataURL(file);
@@ -443,368 +438,468 @@ function App() {
   };
 
   const handleRemoveImage = () => {
-    setImageBase64('');
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''; // Reset file input
-    }
+    setImagePreview(null);
+    setImageBase64(null);
   };
+  
+  const sendToolResult = useCallback(async (command, args, result) => {
+    console.log('Sending tool result:', { command, args, result });
+    await streamResponse(`${API_URL}/gemini/tool-result`, {
+        sessionId: currentSessionId,
+        command,
+        args,
+        result,
+    });
+  }, [currentSessionId]);
 
-  const streamResponse = async (url, body) => {
+  const streamResponse = useCallback(async (url, body) => {
     abortControllerRef.current = new AbortController();
-    const { signal } = abortControllerRef.current;
-
+    setIsLoading(true);
+    setError(null);
     try {
-      const response = await apiFetch(url, { // Use the common apiFetch function
+      const response = await fetch(url, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user.token}`,
+        },
         body: JSON.stringify(body),
-        signal,
+        signal: abortControllerRef.current.signal,
       });
 
-      if (!response || !response.body) {
-        throw new Error('The response has no body.');
+      if (!response.ok || !response.body) {
+        const errorData = await response.json().catch(() => ({ message: 'An unknown error occurred' }));
+        throw new Error(errorData.message);
       }
-
+      
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let accumulatedData = '';
-      
-      let streamingText = '';
-      let accumulatedContent = [];
+      let buffer = '';
 
       const processData = async () => {
         while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            // Stream has ended. We don't set isLoading to false here because
-            // the 'final' message from the stream will handle that.
+          if (abortControllerRef.current.signal.aborted) {
+            reader.cancel();
             break;
           }
+          try {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          accumulatedData += decoder.decode(value, { stream: true });
-          const lines = accumulatedData.split('\n');
-          accumulatedData = lines.pop(); // Keep the last, possibly incomplete, line
+            buffer += decoder.decode(value, { stream: true });
+            
+            let boundary = buffer.lastIndexOf('\n');
+            if (boundary === -1) continue;
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const jsonString = line.substring(6);
+            const jsonLines = buffer.substring(0, boundary).split('\n');
+            buffer = buffer.substring(boundary + 1);
+
+            for (const line of jsonLines) {
+              if (line.trim() === '') continue;
               try {
-                const parsedData = JSON.parse(jsonString);
+                const data = JSON.parse(line);
+                
+                if (data.type === 'session_id' && !currentSessionId) {
+                  setCurrentSessionId(data.payload);
+                  setSessions(prev =>
+                    prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
+                  );
+                } else if (data.type === 'text_chunk') {
+                  setConversation(prev => {
+                    const newConversation = [...prev];
+                    const lastTurn = newConversation[newConversation.length - 1];
+                    if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                      lastTurn.content += data.payload;
+                    } else {
+                      newConversation.push({ role: 'model', content: data.payload, isStreaming: true });
+                    }
+                    return newConversation;
+                  });
+                } else if (data.type === 'final') {
+                    const finalPayload = data.payload;
 
-                if (parsedData.type === 'error') {
-                  console.error("Server-side error:", parsedData.payload);
-                  let errorMessage = `An error occurred: ${parsedData.payload.message}`;
-                  if (parsedData.payload.details && parsedData.payload.details.includes('quota')) {
-                    errorMessage = '✨ You are a power user! You have exceeded the daily free quota for the AI. Please try again tomorrow.';
-                  }
-                  setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🤖 Oops! ${errorMessage}` }] } } }]);
-                  handleStop(false);
-                  return; // Stop processing on error
-                }
+                    if (finalPayload.action === 'runCommand') {
+                      setConversation(prev => {
+                         const newConversation = [...prev];
+                         const lastTurn = newConversation[newConversation.length - 1];
+                         if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                           lastTurn.isStreaming = false;
+                         }
+                         return newConversation;
+                      });
+                      if (ipcRenderer) {
+                        const result = await ipcRenderer.invoke('run-command', finalPayload.parameters);
+                        sendToolResult('runCommand', finalPayload.parameters, result);
+                      } else {
+                        console.warn('ipcRenderer not available. Command not executed.');
+                        setConversation(prev => [...prev, { role: 'system', content: 'Command execution is not available in the web environment.' }]);
+                      }
+                    } else if (finalPayload.action === 'editFile') {
+                        setConversation(prev => {
+                          const newConversation = [...prev];
+                          const lastTurn = newConversation[newConversation.length - 1];
+                          if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                            lastTurn.isStreaming = false;
+                          }
+                          return newConversation;
+                        });
+                        // Start the file edit proposal process
+                        if (ipcRenderer) {
+                          setFileEditProposal({
+                            ...finalPayload.parameters,
+                            originalContent: 'loading',
+                          });
+                        } else {
+                          console.warn('ipcRenderer not available. File edit not possible.');
+                          setConversation(prev => [...prev, { role: 'system', content: 'File editing is not available in the web environment.' }]);
+                        }
+                    } else if (finalPayload.action === 'runScript') {
+                        const { filePath, content } = finalPayload.parameters;
+                        
+                        if (ipcRenderer) {
+                          const fileCheck = await ipcRenderer.invoke('checkFileExists', filePath);
+                          
+                          if (!fileCheck.exists) {
+                            // File doesn't exist, so write it first.
+                            await ipcRenderer.invoke('writeFile', { filePath, content });
+                            setConversation(prev => [...prev, { role: 'system', content: `📥 Script downloaded and saved to "${filePath}".` }]);
+                          }
+                          
+                          // Now execute the script.
+                          const result = await ipcRenderer.invoke('run-command', { command: 'python', args: [filePath] });
+                          sendToolResult('runScript', finalPayload.parameters, result);
+                        } else {
+                          console.warn('ipcRenderer not available. Script execution not possible.');
+                          setConversation(prev => [...prev, { role: 'system', content: 'Script execution is not available in the web environment.' }]);
+                        }
+                    } else { // Default 'reply' action
+                        setConversation(prev => {
+                            const newConversation = [...prev];
+                            const lastTurn = newConversation[newConversation.length - 1];
+                            
+                            // Defensive coding to safely extract content
+                            let contentToDisplay = '';
+                            if (finalPayload && finalPayload.parameters && finalPayload.parameters.content) {
+                                contentToDisplay = finalPayload.parameters.content;
+                            } else if (finalPayload) {
+                                // Fallback for unexpected structures
+                                contentToDisplay = typeof finalPayload === 'string' ? finalPayload : JSON.stringify(finalPayload, null, 2);
+                            }
 
-                if (parsedData.type === 'session_id') {
-                  const newSessionId = parsedData.payload;
-                  if (newSessionId !== currentSessionId) {
-                      setCurrentSessionId(newSessionId);
-                      window.history.pushState({ sessionId: newSessionId }, '', `?sessionId=${newSessionId}`);
-                  }
-                } else if (parsedData.type === 'text_chunk') {
-                  streamingText += parsedData.payload;
-                  const lastItem = accumulatedContent[accumulatedContent.length - 1];
-                  if (lastItem && lastItem.type === 'text') {
-                    lastItem.value = streamingText;
-                  } else {
-                    accumulatedContent.push({ type: 'text', value: streamingText });
-                  }
-                  setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-                } else if (parsedData.type === 'code_chunk') {
-                  streamingText = ''; // Reset for next text block
-                  accumulatedContent.push(parsedData.payload);
-                  setModelResponse({ action: 'reply', parameters: { content: [...accumulatedContent] } });
-                } else if (parsedData.type === 'command_exec') {
-                  const { command, args } = parsedData.payload;
-                  const commandExecutionMessage = { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: `🚀 Executing: \`${command} ${args.join(' ')}\`...` }] } } };
-                  setHistory(prev => [...prev, commandExecutionMessage]);
-                  setModelResponse(null);
-                  const result = await window.electron.runCommand(command, args);
-                  const resultMessageContent = [{ type: 'text', value: result.success ? '✅ Command finished successfully.' : '❌ Command failed.' }];
-                  if (result.output) resultMessageContent.push({ type: 'code', language: 'bash', value: result.output });
-                  if (result.error) resultMessageContent.push({ type: 'code', language: 'bash', value: `ERROR: ${result.error}` });
-                  const resultMessage = { role: 'model', content: { action: 'reply', parameters: { content: resultMessageContent } } };
-                  setHistory(prev => [...prev, resultMessage]);
-                  await sendToolResult(command, args, result);
-                } else if (parsedData.type === 'final') {
-                  setHistory(prev => [...prev, { role: 'model', content: parsedData.payload }]);
-                  setModelResponse(null);
-                  setIsLoading(false);
+                            if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                                lastTurn.content = contentToDisplay;
+                                lastTurn.isStreaming = false;
+                            } else {
+                                newConversation.push({ role: 'model', content: contentToDisplay, isStreaming: false });
+                            }
+                            return newConversation;
+                        });
+                    }
                 }
               } catch (e) {
-                console.error('Failed to parse JSON from stream:', e, jsonString);
+                console.error('Failed to parse JSON line:', line, e);
               }
             }
+          } catch (err) {
+            if (err.name !== 'AbortError') {
+              console.error('Error reading stream:', err);
+              setError('Error processing stream from server.');
+            }
+            break;
           }
         }
       };
+      
       await processData();
 
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        console.log('Fetch aborted by user.');
-        // The handleStop function takes care of UI updates
-        return; 
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setError(err.message);
+        console.error('Streaming error:', err);
       }
-      
-      console.error("Streaming failed:", error);
-      setHistory(prev => [...prev, { role: 'model', content: { action: 'reply', parameters: { content: [{ type: 'text', value: "Sorry, an error occurred with the connection." }] } } }]);
+    } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [user, sendToolResult, currentSessionId, ipcRenderer]);
 
-  const executeTurn = async () => {
-    if ((!prompt.trim() && !imageBase64) || !authToken) return;
+  useEffect(() => {
+    if (fileEditProposal && fileEditProposal.originalContent === 'loading' && ipcRenderer) {
+      const fetchOriginalFile = async () => {
+        const result = await ipcRenderer.invoke('readFile', fileEditProposal.filePath);
+        if (result.success) {
+          setFileEditProposal(prev => ({ ...prev, originalContent: result.content }));
+        } else {
+          setFileEditProposal(prev => ({ ...prev, originalContent: `Error: ${result.error}` }));
+        }
+      };
+      fetchOriginalFile();
+    }
+  }, [fileEditProposal, ipcRenderer]);
 
-    const currentPromptText = prompt;
-    setHistory(prev => [...prev, { role: 'user', content: currentPromptText }]);
-    setPrompt('');
-    setIsLoading(true);
-    setModelResponse('');
+  const executeTurn = useCallback(async () => {
+    const userMessage = input.trim();
+    if (!userMessage && !imageBase64) return;
 
-    const body = {
-      userId: 'temp-user-id', // Temporary user ID
-      message: currentPromptText,
-      sessionId: currentSessionId,
-      platform: navigator.platform,
+    handleStop();
+    setInput('');
+    setImagePreview(null);
+    setImageBase64(null);
+
+    const newTurn = { role: 'user', content: userMessage, imageBase64: imageBase64 };
+    setConversation(prev => [...prev, newTurn]);
+
+    let sessionIdToSend = currentSessionId;
+    if (!sessionIdToSend) {
+      sessionIdToSend = 'temp';
+      setSessions(prev => [{ id: 'temp', title: userMessage.substring(0, 30) }, ...prev]);
+      setCurrentSessionId('temp');
+    }
+
+    await streamResponse(`${API_URL}/gemini/generate`, {
+      sessionId: sessionIdToSend,
+      message: userMessage,
+      platform: window.navigator.platform,
       imageBase64: imageBase64,
-    };
-    
-    // Clear image after sending
-    handleRemoveImage();
+    });
+  }, [input, imageBase64, currentSessionId, streamResponse]);
 
-    await streamResponse(`${API_URL}/gemini/conversation-stream`, body);
-  };
-
-  const sendToolResult = async (command, args, result) => {
-    if (!currentSessionId) {
-      console.error("Cannot send tool result without a session ID.");
-      return;
-    }
-    
-    setIsLoading(true);
-    setModelResponse('');
-
-    const toolResultText = `TOOL_OUTPUT:\nCommand: ${command} ${args.join(' ')}\nStatus: ${result.success ? 'Success' : 'Failure'}\nOutput:\n${result.output}\nError:\n${result.error || ''}`;
-    setHistory(prev => [...prev, { role: 'user', content: `(Sent tool output to AI)\n${result.output || result.error}` }]);
-
-    const body = {
-      userId: 'temp-user-id',
-      message: toolResultText,
-      sessionId: currentSessionId,
-      platform: navigator.platform,
-    };
-
-    await streamResponse(`${API_URL}/gemini/conversation-stream`, body);
-  };
 
   const handleNewConversation = () => {
-    setCurrentSessionId(`temp-${Date.now()}`);
-    setHistory([]);
+    setIsLoading(false);
+    handleStop(true);
+    setConversation([]);
+    setCurrentSessionId(null);
+    setInput('');
+    setImagePreview(null);
+    setImageBase64(null);
+    setPage(1);
+    setHasMore(true);
     setTotalConversations(0);
-    setConversationPage(1);
-    setImageBase64('');
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''; // Reset file input
-    }
+    setError(null);
   };
 
   const handleSessionClick = (sessionId) => {
-    if (sessionId !== currentSessionId) {
-      setCurrentSessionId(sessionId);
-      window.history.pushState({ sessionId }, '', `?sessionId=${sessionId}`);
-    }
+    if (sessionId === currentSessionId) return;
+    handleStop(true);
+    setCurrentSessionId(sessionId);
+    setConversation([]);
+    fetchSessionHistory(sessionId, 1);
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    executeTurn();
+    if (isLoading) {
+      handleStop(true);
+    } else {
+      executeTurn();
+    }
   };
 
   const handleLoadMore = () => {
-    if (!scrollRef.current) return;
-    const nextPage = conversationPage + 1;
-    beforeHistoryRender.current = { previousScrollHeight: scrollRef.current.scrollHeight };
-    fetchSessionHistory(currentSessionId, nextPage);
-    setConversationPage(nextPage);
+    if (!hasMore || isLoading) return;
+    prevScrollHeightRef.current = scrollContainerRef.current?.scrollHeight;
+    fetchSessionHistory(currentSessionId, page + 1, true);
   };
 
-  const hasMoreConversations = history.length < totalConversations;
-
   const handleLogout = () => {
-    setAuthToken(null);
-    localStorage.removeItem('authToken');
+    setUser(null);
+    localStorage.removeItem('accessToken');
+    setSessions([]);
+    setConversation([]);
+    setCurrentSessionId(null);
   };
 
   const handleLoginSuccess = (token) => {
-    localStorage.setItem('authToken', token);
-    setAuthToken(token);
-    // window.history.pushState({}, '', '/'); // This is not needed anymore
+    localStorage.setItem('accessToken', token);
+    const userData = { token };
+    setUser(userData);
+    loadSessions(token);
   };
   
-  const renderTurn = (turnContent, index) => {
-    if (!turnContent) return null; // Guard against null content
+  const renderWelcomeScreen = () => (
+    <div className="welcome-screen">
+      <div className="auth-logo">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L2 7V17L12 22L22 17V7L12 2Z" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M2 7L12 12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M22 7L12 12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M12 22V12" stroke="var(--accent-color)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M7 4.5L17 9.5" stroke="var(--accent-color)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
+      <h1>How can I help you today?</h1>
+    </div>
+  );
 
-    if (typeof turnContent === 'string') {
-        return <ReactMarkdown components={{ code: CodeBlock }} remarkPlugins={[remarkGfm]}>{turnContent}</ReactMarkdown>;
-    }
-    
-    const { action, parameters } = turnContent;
-
-    if (!action || !parameters) {
-      // It might be a simple string if it's from old history, or malformed.
-      // Let's try to render it as a string.
-      return <ReactMarkdown components={{ code: CodeBlock }} remarkPlugins={[remarkGfm]}>{JSON.stringify(turnContent)}</ReactMarkdown>;
-    }
-
-    if (action === 'reply') {
-      // Handle new structured content format
-      if (parameters.content && Array.isArray(parameters.content)) {
-        return parameters.content.map((item, i) => {
-          const key = `${index}-${i}`;
-          if (item.type === 'text') {
-            return <div key={key}><ReactMarkdown components={{code: CodeBlock}} remarkPlugins={[remarkGfm]}>{item.value}</ReactMarkdown></div>
-          }
-          if (item.type === 'code') {
-            return <CodeCopyBlock key={key} language={item.language} code={item.value} />
-          }
-          return null;
-        });
-      }
-      
-      // Handle old text format for backward compatibility
-      if (parameters.text) {
-        return <ReactMarkdown components={{ code: CodeBlock }} remarkPlugins={[remarkGfm]}>{parameters.text}</ReactMarkdown>;
-      }
-
-      return null;
-    }
-
-    if (action === 'runCommand') {
-      const commandString = parameters.command || '';
-      const argsString = Array.isArray(parameters.args) ? parameters.args.join(' ') : '';
+  const renderTurn = (turn, index) => {
+    if (turn.role === 'user') {
       return (
-        <div className="action-request">
-          <strong>Action Planned:</strong> Execute Command
-          <pre>{`> ${commandString} ${argsString}`.trim()}</pre>
+        <div key={index} className="turn user">
+          <div className="turn-content">
+            {turn.content}
+            {turn.imageBase64 && <img src={`data:image/png;base64,${turn.imageBase64}`} alt="User upload" className="turn-image" />}
+          </div>
         </div>
       );
     }
+    if (turn.role === 'model') {
+      return renderModelTurn(turn, index);
+    }
+    if (turn.role === 'system') {
+       return (
+        <div key={index} className="turn system">
+          <div className="turn-content">
+            {turn.content}
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
+  
+  const renderModelTurn = (turn, index) => {
+    let contentToRender = 'Error: Could not display content.';
+
+    try {
+      let parsedContent = turn.content;
+
+      // 1. Check if content is a string that looks like JSON and try to parse it.
+      if (typeof parsedContent === 'string') {
+        const trimmedContent = parsedContent.trim();
+        if (trimmedContent.startsWith('[') || trimmedContent.startsWith('{')) {
+          try {
+            parsedContent = JSON.parse(trimmedContent);
+          } catch (e) {
+            // Not a valid JSON, treat as a plain string.
+          }
+        }
+      }
+
+      // 2. Process the (potentially parsed) content.
+      if (typeof parsedContent === 'string') {
+        contentToRender = parsedContent;
+      } else if (Array.isArray(parsedContent)) {
+        contentToRender = parsedContent
+          .map(part => (part.type === 'text' ? part.value : ''))
+          .join('');
+      } else if (typeof parsedContent === 'object' && parsedContent !== null) {
+        if (parsedContent.action === 'reply' && parsedContent.parameters) {
+          contentToRender = parsedContent.parameters.content;
+        } else {
+          contentToRender = '```json\n' + JSON.stringify(parsedContent.parameters || parsedContent, null, 2) + '\n```';
+        }
+      }
+    } catch (error) {
+        console.error("Error rendering model turn:", error);
+    }
     
+    if (typeof contentToRender !== 'string' || contentToRender.trim() === '') {
+        // Fallback for empty or non-string content to avoid React errors
+        const lastTurn = conversation[conversation.length - 1];
+        if (lastTurn && lastTurn.isStreaming) {
+             contentToRender = ''; // Render nothing while streaming empty chunks
+        } else {
+             contentToRender = '...'; // Or a placeholder for non-streaming empty content
+        }
+    }
+
+
     return (
-      <div key={index} className="turn">
-        <div className="action-request">
-          <strong>Action:</strong> {action}
-          <pre>{JSON.stringify(parameters, null, 2)}</pre>
+      <div key={index} className="turn assistant">
+        <div className="turn-content">
+          <ReactMarkdown
+            children={contentToRender}
+            remarkPlugins={[remarkGfm]}
+            components={{ code: CodeBlock }}
+          />
         </div>
       </div>
     );
   };
   
-  // Simple Router
-  if (!authToken) {
+  const visibleConversation = conversation.slice(-MAX_MESSAGES);
+
+  if (!user) {
     return <AuthPage onLoginSuccess={handleLoginSuccess} />;
   }
 
-  const renderModelTurn = (turnContent, index) => {
-    const renderedTurn = renderTurn(turnContent, index);
-    if (!renderedTurn) return null; // Don't render anything if the turn is empty
-
-    return (
-      <div key={index} className="message model">
-        {renderedTurn}
-      </div>
-    );
-  };
-    
   return (
-    <div className={`App-container ${!isSidebarOpen ? 'sidebar-closed' : ''}`}>
-        <Sidebar 
-            sessions={sessions}
-            currentSessionId={currentSessionId}
-            onSessionClick={handleSessionClick}
-            onNewConversation={handleNewConversation}
-            onLogout={handleLogout}
-        />
-        <main className="main-content">
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
-              className="sidebar-toggle-button"
-            >
-              {isSidebarOpen ? '‹' : '›'}
-            </button>
-            <div className="chat-window" ref={scrollRef}>
-                {hasMoreConversations && (
-                  <div className="load-more-container">
-                    <button onClick={handleLoadMore} disabled={isHistoryLoading} className="load-more-button">
-                      {isHistoryLoading ? 'Loading...' : 'Load More'}
-                    </button>
-                  </div>
-                )}
-                {history.map((item, index) => {
-                    switch (item.role) {
-                        case 'user':
-                            return <div key={index} className="message user"><p>{item.content}</p></div>;
-                        case 'model':
-                            const content = item.content;
-                            if (Array.isArray(content)) {
-                                return content.map((action, actionIndex) => 
-                                  renderModelTurn(action, `${index}-${actionIndex}`)
-                                );
-                            }
-                            return renderModelTurn(content, index);
-                        default:
-                            return null;
-                    }
-                })}
-                {isLoading && !modelResponse && <div className="loading-indicator">Thinking...</div>}
-                {modelResponse && renderModelTurn(modelResponse, 'streaming')}
-                <div ref={chatEndRef} />
+    <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
+      <Sidebar
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        onSessionClick={handleSessionClick}
+        onNewConversation={handleNewConversation}
+        onLogout={handleLogout}
+        isSidebarOpen={isSidebarOpen}
+        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+      />
+      <main className="chat-container">
+        <button className="sidebar-toggle-button" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+        </button>
+        <div className="conversation" ref={scrollContainerRef}>
+          {conversation.length === 0 && !isLoading && renderWelcomeScreen()}
+          
+          {hasMore && totalConversations > conversation.length && (
+            <div className="load-more-container">
+              <button onClick={handleLoadMore} disabled={isLoading}>
+                Load More Conversations
+              </button>
             </div>
-            <form onSubmit={handleSubmit} className="message-form">
-                <input
-                    type="text"
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder={isLoading ? "Working..." : "Ask Deskina to do something..."}
-                    disabled={isLoading}
-                />
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleImageChange}
-                  style={{ display: 'none' }}
-                  accept="image/png, image/jpeg, image/webp, image/gif"
-                />
-                <button 
-                  type="button" 
-                  onClick={() => fileInputRef.current.click()} 
-                  className="attach-button"
-                  disabled={isLoading}
-                >
-                  📎
-                </button>
-                {isLoading ? (
-                  <button type="button" onClick={() => handleStop(true)} className="stop-button">Stop</button>
-                ) : (
-                  <button type="submit" disabled={isLoading}>Send</button>
-                )}
-            </form>
-            {imageBase64 && (
-              <div className="image-preview">
-                <img src={`data:image/png;base64,${imageBase64}`} alt="Preview" />
+          )}
+
+          {visibleConversation.map((turn, index) => renderTurn(turn, index))}
+          
+          {isLoading && (
+            <div className="turn assistant">
+              <div className="turn-content">
+                <div className="loading-dots">
+                  <span></span><span></span><span></span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+        <div className="input-area">
+          <div className="input-wrapper">
+            {imagePreview && (
+              <div className="image-preview-container">
+                <img src={imagePreview} alt="Preview" className="image-preview" />
                 <button onClick={handleRemoveImage} className="remove-image-button">×</button>
               </div>
             )}
-        </main>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!isLoading) {
+                    handleSubmit(e);
+                  }
+                }
+              }}
+              placeholder="Ask Deskina anything..."
+              rows="1"
+              disabled={isLoading}
+            />
+            <label htmlFor="file-upload" className="attach-button">📎</label>
+            <input id="file-upload" type="file" accept="image/*" onChange={handleImageChange} style={{ display: 'none' }} />
+            <button onClick={handleSubmit} disabled={isLoading || !input.trim()}>
+              {isLoading ? '■' : '▶'}
+            </button>
+          </div>
+        </div>
+      </main>
+      <EditFileProposal proposal={fileEditProposal} onAccept={handleAcceptEdit} onReject={handleRejectEdit} />
     </div>
   );
-}
+};
 
 export default App;

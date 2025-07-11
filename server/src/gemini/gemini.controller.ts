@@ -7,7 +7,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 export class GeminiController {
   constructor(private readonly geminiService: GeminiService) {}
 
-  @Post('conversation-stream')
+  @Post('generate')
   @UseGuards(JwtAuthGuard) // Apply the JWT guard to protect this endpoint
   async conversationStream(
     @Request() req, // Get the whole request object

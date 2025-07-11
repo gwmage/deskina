@@ -7,6 +7,7 @@ import { SessionModule } from './session/session.module';
 import { PrismaModule } from './prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { EmailModule } from './email/email.module';
+import { ScriptsModule } from './scripts/scripts.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { EmailModule } from './email/email.module';
     SessionModule,
     AuthModule,
     EmailModule,
+    ScriptsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

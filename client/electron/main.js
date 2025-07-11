@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const isDev = require('electron-is-dev');
 const { spawn } = require('child_process');
 
@@ -102,4 +103,34 @@ ipcMain.handle('run-command', async (event, { command, args }) => {
       reject({ success: false, error: err.message });
     });
   });
+});
+
+ipcMain.handle('readFile', async (event, filePath) => {
+  try {
+    const content = await fs.promises.readFile(filePath, 'utf-8');
+    return { success: true, content };
+  } catch (error) {
+    console.error(`[Main Process] Failed to read file: ${filePath}`, error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('writeFile', async (event, { filePath, content }) => {
+  try {
+    await fs.promises.writeFile(filePath, content, 'utf-8');
+    console.log(`[Main Process] Successfully wrote to file: ${filePath}`);
+    return { success: true };
+  } catch (error) {
+    console.error(`[Main Process] Failed to write to file: ${filePath}`, error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('checkFileExists', async (event, filePath) => {
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK);
+    return { exists: true };
+  } catch {
+    return { exists: false };
+  }
 }); 
