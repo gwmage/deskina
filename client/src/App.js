@@ -417,19 +417,36 @@ const App = () => {
   };
 
   const handleImageChange = (event) => {
-    console.log("File input changed");
-    const file = event.target.files[0];
-    console.log("Selected file:", file);
-    if (file && file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        console.log("File reading complete");
-        const base64String = reader.result.replace('data:', '').replace(/^.+,/, '');
-        setImagePreview(reader.result);
-        setImageBase64(base64String);
-      };
-      reader.readAsDataURL(file);
+    const input = event.target;
+    if (!input.files || input.files.length === 0) {
+      input.value = '';
+      return;
     }
+
+    const file = input.files[0];
+    if (!file.type.startsWith('image/')) {
+      setError(`"${file.name}" is not a supported image file.`);
+      input.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onloadend = () => {
+      const resultStr = reader.result;
+      setImagePreview(resultStr);
+      const base64String = resultStr.split(',')[1];
+      setImageBase64(base64String);
+      setError(null); 
+    };
+
+    reader.onerror = () => {
+      console.error("FileReader error:", reader.error);
+      setError("An error occurred while reading the selected file.");
+    };
+
+    reader.readAsDataURL(file);
+    input.value = '';
   };
 
   const handleRemoveImage = () => {
