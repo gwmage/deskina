@@ -503,13 +503,22 @@ const App = () => {
                 } else if (data.type === 'text_chunk') {
                   setConversation(prev => {
                     const newConversation = [...prev];
-                    const lastTurn = newConversation[newConversation.length - 1];
+                    const lastTurnIndex = newConversation.length - 1;
+                    const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
+
                     if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                      lastTurn.content += data.payload;
+                      // IMMUTABLE UPDATE: Create a new turn object instead of mutating the old one.
+                      const updatedTurn = {
+                        ...lastTurn,
+                        content: lastTurn.content + data.payload,
+                      };
+                      newConversation[lastTurnIndex] = updatedTurn;
+                      return newConversation;
                     } else {
-                      newConversation.push({ role: 'model', content: data.payload, isStreaming: true });
+                      // This part is already immutable as it pushes a new object.
+                      newConversation.push({ id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true });
+                      return newConversation;
                     }
-                    return newConversation;
                   });
                 } else if (data.type === 'final') {
                     // This 'final' event can be a successful response from the model
@@ -832,6 +841,8 @@ const App = () => {
   };
   
   const visibleConversation = conversation.slice(-MAX_MESSAGES);
+  const lastTurn = conversation[conversation.length - 1];
+  const isCurrentlyStreaming = lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming;
 
   if (!user) {
     return <AuthPage onLoginSuccess={handleLoginSuccess} />;
@@ -867,7 +878,7 @@ const App = () => {
 
           {visibleConversation.map((turn, index) => renderTurn(turn, index))}
           
-          {isLoading && (
+          {isLoading && !isCurrentlyStreaming && (
             <div className="turn assistant">
               <div className="turn-content">
                 <div className="loading-dots">

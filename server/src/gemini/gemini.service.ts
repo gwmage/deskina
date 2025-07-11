@@ -165,95 +165,88 @@ export class GeminiService implements OnModuleInit {
         promptParts.push(this.convertBase64ToPart(imageBase64, 'image/png'));
       }
 
+      // --- 스트리밍 로직 수정 시작 ---
       const result = await chat.sendMessageStream(promptParts);
 
+      // 1. AI 응답을 클라이언트로 보내기 전에 서버 내부 버퍼에 모두 저장합니다.
       let rawResponseText = '';
       for await (const chunk of result.stream) {
-        const chunkText = chunk.text();
-        rawResponseText += chunkText;
-        yield { type: 'text_chunk', payload: chunkText };
+        rawResponseText += chunk.text();
       }
       
-      // 1. Save the raw JSON string from the model to the database.
-      await (this.prisma as any).conversation.create({
+      const usageMetadata = (await result.response)?.usageMetadata;
+
+      // 2. 완전한 응답 텍스트를 파싱합니다. 파싱 실패 시 일반 텍스트로 간주합니다.
+      let finalAction;
+      try {
+        finalAction = JSON.parse(rawResponseText);
+      } catch (e) {
+        this.logger.warn('Failed to parse AI response as JSON, treating as plain text reply.', rawResponseText);
+        finalAction = { action: 'reply', parameters: { content: rawResponseText || "AI로부터 비정상적인 응답을 받았습니다." } };
+      }
+
+      // 3. AI의 전체 응답을 먼저 DB에 저장합니다.
+      await this.prisma.conversation.create({
         data: {
           sessionId: currentSessionId,
           role: 'model',
-          content: rawResponseText, // The raw JSON string
+          content: JSON.stringify(finalAction),
         },
       });
 
-      // 2. Parse the response to be sent to the client.
-      const parsedPayload = JSON.parse(rawResponseText);
-
-      // 3. Restore the original, consistent message structure for the client.
-      const finalClientPayload = {
-        action: parsedPayload.action || 'reply', // Default to 'reply' if no action
-        parameters: parsedPayload.parameters || parsedPayload, // Use the whole payload as params if needed
-      };
-      
-      // 4. Handle server-side actions OR pass client-side actions through
-      const { action, parameters } = finalClientPayload;
-
-      if (action === 'createScript') {
-        const { name, description, code } = parameters;
-        const filePath = `scripts/${name}.py`; // Define file path
-        
-        await this.scriptsService.create({
-          userId,
-          name,
-          description,
-          filePath,
-          content: code,
+      // 토큰 사용량 기록
+      if (usageMetadata) {
+        await this.prisma.tokenUsage.create({
+          data: {
+            userId,
+            sessionId: currentSessionId,
+            modelName: 'gemini-1.5-flash',
+            promptTokens: usageMetadata.promptTokenCount,
+            completionTokens: usageMetadata.candidatesTokenCount || 0,
+            totalTokens: usageMetadata.totalTokenCount,
+          },
         });
-
-        yield { type: 'final', payload: {
-          action: 'reply',
-          parameters: { content: `✅ 스크립트 "${name}"을(를) 성공적으로 생성했습니다.`}
-        }};
-      } else if (action === 'listScripts') {
-        const userScripts = await this.scriptsService.findAllForUser(userId);
-        
-        let content;
-        if (userScripts.length === 0) {
-          content = "생성된 스크립트가 없습니다. 새로 만들까요?";
-        } else {
-          const scriptList = userScripts.map(s => `- **${s.name}**: ${s.description || '설명 없음'}`).join('\n');
-          content = `### 📝 내 스크립트 목록\n\n${scriptList}`;
-        }
-
-        yield { type: 'final', payload: {
-          action: 'reply',
-          parameters: { content }
-        }};
-      } else if (action === 'runScript') {
-        const { name } = parameters;
-        // Find the script by name for the current user
-        const script = await (this.prisma as any).script.findUnique({
-          where: { userId_name: { userId, name } },
-        });
-
-        if (!script) {
-          yield { type: 'final', payload: {
-            action: 'reply',
-            parameters: { content: `❌ 스크립트 "${name}"을(를) 찾을 수 없습니다.`}
-          }};
-        } else {
-          // Pass the enriched runScript action to the client, including all details
-          yield { type: 'final', payload: {
-            action: 'runScript',
-            parameters: {
-              id: script.id,
-              name: script.name,
-              filePath: script.filePath,
-              content: script.content,
-            }
-          }};
-        }
-      } else {
-        // For 'reply', 'editFile', 'runCommand', just pass it to the client
-        yield { type: 'final', payload: finalClientPayload };
       }
+
+      // 4. 서버 측 전용 액션을 처리합니다. (createScript, listScripts 등)
+      // 이 로직은 기존과 동일하게 유지합니다.
+      const actionToExecute = finalAction;
+      let actionForClient = actionToExecute;
+
+      if (actionToExecute.action === 'createScript') {
+        const { name, description, code } = actionToExecute.parameters;
+        await this.scriptsService.create({ userId, name, description, filePath: `scripts/${name}.py`, content: code });
+        actionForClient = { action: 'reply', parameters: { content: `✅ 스크립트 "${name}"을(를) 생성했습니다.` } };
+      } else if (actionToExecute.action === 'listScripts') {
+        const scripts = await this.scriptsService.findAllForUser(userId);
+        const content = scripts.length > 0
+          ? `### 📝 스크립트 목록\n\n${scripts.map(s => `- **${s.name}**`).join('\n')}`
+          : "생성된 스크립트가 없습니다.";
+        actionForClient = { action: 'reply', parameters: { content } };
+      } else if (actionToExecute.action === 'runScript') {
+        const script = await this.prisma.script.findUnique({ where: { userId_name: { userId, name: actionToExecute.parameters.name } } });
+        if (script) {
+            actionForClient = { action: 'runScript', parameters: script };
+        } else {
+            actionForClient = { action: 'reply', parameters: { content: `❌ 스크립트 "${actionToExecute.parameters.name}"을(를) 찾을 수 없습니다.` } };
+        }
+      }
+
+      // 5. 처리된 최종 액션을 클라이언트에 보냅니다.
+      if (actionForClient.action === 'reply') {
+        // 'reply' 액션은 내용을 한 글자씩 스트리밍합니다.
+        const content = actionForClient.parameters.content || '';
+        for (const char of content) {
+          yield { type: 'text_chunk', payload: char };
+          await new Promise(resolve => setTimeout(resolve, 20)); // 타이핑 속도 조절
+        }
+        // 'reply'의 경우 final 이벤트를 보내지 않아 중복 출력을 방지합니다.
+      } else {
+        // 'runCommand' 같은 다른 액션들은 final 이벤트를 한 번만 보냅니다.
+        yield { type: 'final', payload: actionForClient };
+      }
+      // --- 스트리밍 로직 수정 끝 ---
+
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId} in session ${currentSessionId}:`, error.stack);
       
@@ -262,29 +255,115 @@ export class GeminiService implements OnModuleInit {
         userFriendlyMessage = '🤖 API 하루 사용량을 초과했습니다.';
       }
       
-      // This is the correct, simple payload structure the client expects for rendering.
-      const errorPayloadForClient = {
+      const errorPayload = {
         action: 'reply',
-        parameters: {
-          content: userFriendlyMessage
-        }
+        parameters: { content: userFriendlyMessage }
       };
-
-      // Create the payload to be saved in the database, which is a stringified version of the client payload.
-      const errorPayloadForDb = JSON.stringify(errorPayloadForClient);
 
       if (currentSessionId) {
         await this.prisma.conversation.create({
           data: {
             sessionId: currentSessionId,
             role: 'model',
-            content: errorPayloadForDb,
+            content: JSON.stringify(errorPayload),
           },
         });
       }
 
-      // Yield the correctly structured error to the client as a final message.
-      yield { type: 'final', payload: errorPayloadForClient };
+      // 오류 발생 시에도 사용자에게 메시지를 스트리밍하여 보여줍니다.
+      for (const char of userFriendlyMessage) {
+        yield { type: 'text_chunk', payload: char };
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
+  }
+
+  // tool-result 엔드포인트에서 호출될 새 함수
+  async *sendToolResult(
+    userId: string,
+    sessionId: string,
+    toolName: string,
+    params: any,
+    result: any,
+  ) {
+    const userFriendlyResult = `\`${toolName}\` 실행 완료.\n\n결과:\n\`\`\`sh\n${result.stdout || result.stderr || '표준 출력이 없습니다.'}\n\`\`\``;
+
+    // 1. Tool 실행 결과를 대화 기록에 추가 (사용자 역할)
+    await this.prisma.conversation.create({
+      data: {
+        sessionId,
+        role: 'user', // 시스템(Tool)의 응답이지만, AI에게는 'user'의 입력처럼 전달
+        content: userFriendlyResult,
+      },
+    });
+
+    // 2. 현재까지의 대화 기록을 다시 가져옵니다.
+    const history: any[] = await this.prisma.conversation.findMany({
+      where: { sessionId: sessionId },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    });
+
+    const chatHistory = history.map((conv) => {
+      const parts: Part[] = [];
+      if (conv.content) parts.push({ text: conv.content });
+      if (conv.role === 'user' && conv.imageBase64) {
+        parts.push(this.convertBase64ToPart(conv.imageBase64, 'image/png'));
+      }
+      return {
+        role: conv.role === 'model' ? 'model' : 'user',
+        parts: parts.filter(Boolean),
+      };
+    }).filter(h => h.parts.length > 0);
+
+    // 3. Tool 실행 결과를 바탕으로 AI에게 후속 응답을 생성하도록 요청합니다.
+    const chat = this.model.startChat({
+      history: chatHistory,
+      generationConfig: { maxOutputTokens: 2000, responseMimeType: 'application/json' },
+    });
+
+    const resultStream = await chat.sendMessageStream(userFriendlyResult);
+
+    // 4. 여기서부터의 로직은 generateResponse와 동일합니다. (코드 중복이지만 명확성을 위해 유지)
+    let rawResponseText = '';
+    for await (const chunk of resultStream.stream) {
+      rawResponseText += chunk.text();
+    }
+    
+    const usageMetadata = (await resultStream.response)?.usageMetadata;
+
+    let finalAction;
+    try {
+      finalAction = JSON.parse(rawResponseText);
+    } catch (e) {
+      finalAction = { action: 'reply', parameters: { content: rawResponseText } };
+    }
+
+    await this.prisma.conversation.create({
+      data: { sessionId, role: 'model', content: JSON.stringify(finalAction) },
+    });
+    
+    if (usageMetadata) {
+      await this.prisma.tokenUsage.create({
+        data: {
+          userId,
+          sessionId,
+          modelName: 'gemini-1.5-flash',
+          promptTokens: usageMetadata.promptTokenCount,
+          completionTokens: usageMetadata.candidatesTokenCount || 0,
+          totalTokens: usageMetadata.totalTokenCount,
+        },
+      });
+    }
+
+    if (finalAction.action === 'reply') {
+      const content = finalAction.parameters.content || '';
+      for (const char of content) {
+        yield { type: 'text_chunk', payload: char };
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    } else {
+      yield { type: 'final', payload: finalAction };
     }
   }
 }

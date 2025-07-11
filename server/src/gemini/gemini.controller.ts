@@ -54,4 +54,47 @@ export class GeminiController {
       res.end();
     }
   }
+
+  @Post('tool-result')
+  @UseGuards(JwtAuthGuard)
+  async toolResult(
+    @Request() req,
+    @Body()
+    body: {
+      sessionId: string;
+      toolName: string;
+      params: any;
+      result: any;
+    },
+    @Res() res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const userId = req.user.id;
+
+    try {
+      const stream = this.geminiService.sendToolResult(
+        userId,
+        body.sessionId,
+        body.toolName,
+        body.params,
+        body.result,
+      );
+
+      for await (const chunk of stream) {
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+    } catch (error) {
+      const errorPayload = {
+        type: 'error',
+        payload: { message: error.message || 'Error processing tool result.' },
+      };
+      res.write(`data: ${JSON.stringify(errorPayload)}\n\n`);
+    } finally {
+      res.end();
+    }
+  }
 }
