@@ -361,15 +361,9 @@ const App = () => {
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
-      const formattedHistory = data.conversations.map(turn => {
-        let content;
-        try {
-          content = turn.role === 'model' ? JSON.parse(turn.content).parameters.content : turn.content;
-        } catch (e) {
-          content = turn.content;
-        }
-        return { ...turn, content };
-      }).reverse(); // Reverse once after fetching
+      // The content from the DB should be rendered as-is, without pre-parsing.
+      // The rendering logic in renderModelTurn will handle all parsing.
+      const formattedHistory = data.conversations.reverse(); 
 
       setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
       setTotalConversations(data.total);
@@ -577,20 +571,15 @@ const App = () => {
                             const newConversation = [...prev];
                             const lastTurn = newConversation[newConversation.length - 1];
                             
-                            // Defensive coding to safely extract content
-                            let contentToDisplay = '';
-                            if (finalPayload && finalPayload.parameters && finalPayload.parameters.content) {
-                                contentToDisplay = finalPayload.parameters.content;
-                            } else if (finalPayload) {
-                                // Fallback for unexpected structures
-                                contentToDisplay = typeof finalPayload === 'string' ? finalPayload : JSON.stringify(finalPayload, null, 2);
-                            }
-
+                            // The final payload is the complete, parsed object from the stream.
+                            // Store it directly. The renderer will handle parsing later.
+                            const finalContent = data.payload;
+    
                             if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                                lastTurn.content = contentToDisplay;
+                                lastTurn.content = finalContent;
                                 lastTurn.isStreaming = false;
                             } else {
-                                newConversation.push({ role: 'model', content: contentToDisplay, isStreaming: false });
+                                newConversation.push({ role: 'model', content: finalContent, isStreaming: false });
                             }
                             return newConversation;
                         });
@@ -636,6 +625,14 @@ const App = () => {
       fetchOriginalFile();
     }
   }, [fileEditProposal, ipcRenderer]);
+
+  // Focus input on new conversation or when switching conversations
+  useEffect(() => {
+    if (!isLoading) {
+      inputRef.current?.focus();
+    }
+  }, [currentSessionId, isLoading]);
+
 
   const executeTurn = useCallback(async () => {
     const userMessage = input.trim();
@@ -694,6 +691,7 @@ const App = () => {
     } else {
       executeTurn();
     }
+    inputRef.current?.focus();
   };
 
   const handleLoadMore = () => {
@@ -759,57 +757,62 @@ const App = () => {
   };
   
   const renderModelTurn = (turn, index) => {
-    let contentToRender = 'Error: Could not display content.';
-
-    try {
-      let parsedContent = turn.content;
-
-      // 1. Check if content is a string that looks like JSON and try to parse it.
-      if (typeof parsedContent === 'string') {
-        const trimmedContent = parsedContent.trim();
-        if (trimmedContent.startsWith('[') || trimmedContent.startsWith('{')) {
-          try {
-            parsedContent = JSON.parse(trimmedContent);
-          } catch (e) {
-            // Not a valid JSON, treat as a plain string.
-          }
-        }
-      }
-
-      // 2. Process the (potentially parsed) content.
-      if (typeof parsedContent === 'string') {
-        contentToRender = parsedContent;
-      } else if (Array.isArray(parsedContent)) {
-        contentToRender = parsedContent
-          .map(part => (part.type === 'text' ? part.value : ''))
-          .join('');
-      } else if (typeof parsedContent === 'object' && parsedContent !== null) {
-        if (parsedContent.action === 'reply' && parsedContent.parameters) {
-          contentToRender = parsedContent.parameters.content;
-        } else {
-          contentToRender = '```json\n' + JSON.stringify(parsedContent.parameters || parsedContent, null, 2) + '\n```';
-        }
-      }
-    } catch (error) {
-        console.error("Error rendering model turn:", error);
-    }
+    let contentToDisplay = '';
     
-    if (typeof contentToRender !== 'string' || contentToRender.trim() === '') {
-        // Fallback for empty or non-string content to avoid React errors
-        const lastTurn = conversation[conversation.length - 1];
-        if (lastTurn && lastTurn.isStreaming) {
-             contentToRender = ''; // Render nothing while streaming empty chunks
-        } else {
-             contentToRender = '...'; // Or a placeholder for non-streaming empty content
-        }
-    }
+    try {
+        let data = turn.content;
 
+        // Phase 1: Ensure `data` is a JS object/array if it's a JSON string.
+        if (typeof data === 'string') {
+            const trimmedData = data.trim();
+            if ((trimmedData.startsWith('{') && trimmedData.endsWith('}')) || (trimmedData.startsWith('[') && trimmedData.endsWith(']'))) {
+                try {
+                    data = JSON.parse(data);
+                } catch (e) {
+                    // Not valid JSON, so it's just a plain string. `data` remains a string.
+                }
+            }
+        }
+
+        // Phase 2: Extract the string for display from the (potentially parsed) `data`.
+        if (typeof data === 'string') {
+            contentToDisplay = data;
+        } else if (Array.isArray(data)) {
+            // Handles cases where `data` is an array like [{"type": "text", ...}]
+            contentToDisplay = data
+                .filter(part => part.type === 'text' && part.value)
+                .map(part => part.value)
+                .join('');
+        } else if (typeof data === 'object' && data !== null) {
+            // Handles the specific nested structure from the user: { action: "reply", parameters: { content: [...] } }
+            if (data.action === 'reply' && data.parameters && data.parameters.content) {
+                const innerContent = data.parameters.content;
+                if (Array.isArray(innerContent)) {
+                    contentToDisplay = innerContent
+                        .filter(part => part.type === 'text' && part.value)
+                        .map(part => part.value)
+                        .join('');
+                } else if (typeof innerContent === 'string') {
+                    contentToDisplay = innerContent;
+                }
+            } else {
+                // It's another kind of object, probably a tool call. Stringify it for display.
+                contentToDisplay = '```json\n' + JSON.stringify(data.parameters || data, null, 2) + '\n```';
+            }
+        } else {
+            contentToDisplay = 'Error: Could not render content.';
+        }
+
+    } catch(e) {
+        console.error("Failed to render model turn content", e);
+        contentToDisplay = "Error displaying response.";
+    }
 
     return (
       <div key={index} className="turn assistant">
         <div className="turn-content">
           <ReactMarkdown
-            children={contentToRender}
+            children={contentToDisplay}
             remarkPlugins={[remarkGfm]}
             components={{ code: CodeBlock }}
           />
