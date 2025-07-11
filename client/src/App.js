@@ -491,7 +491,9 @@ const App = () => {
             for (const line of jsonLines) {
               if (line.trim() === '') continue;
               try {
-                const data = JSON.parse(line);
+                // SSE standard sends "data: " prefix, which must be removed before parsing.
+                const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
+                const data = JSON.parse(jsonString);
                 
                 if (data.type === 'session_id' && !currentSessionId) {
                   setCurrentSessionId(data.payload);
@@ -510,6 +512,9 @@ const App = () => {
                     return newConversation;
                   });
                 } else if (data.type === 'final') {
+                    // This 'final' event can be a successful response from the model
+                    // OR a structured error message from our server's catch block.
+                    // The 'renderModelTurn' function is designed to correctly parse either.
                     const finalPayload = data.payload;
 
                     if (finalPayload.action === 'runCommand') {
@@ -566,22 +571,27 @@ const App = () => {
                           console.warn('ipcRenderer not available. Script execution not possible.');
                           setConversation(prev => [...prev, { role: 'system', content: 'Script execution is not available in the web environment.' }]);
                         }
-                    } else { // Default 'reply' action
+                    } else { // Handles 'reply' action for both normal and error messages
                         setConversation(prev => {
-                            const newConversation = [...prev];
-                            const lastTurn = newConversation[newConversation.length - 1];
+                            const lastTurnIndex = prev.length - 1;
+                            // Stringify the payload here to match the format of data loaded from DB.
+                            const newTurnContent = JSON.stringify(finalPayload);
+
+                            if (lastTurnIndex < 0) { // No previous turns
+                                return [{ role: 'model', content: newTurnContent, isStreaming: false }];
+                            }
                             
-                            // The final payload is the complete, parsed object from the stream.
-                            // Store it directly. The renderer will handle parsing later.
-                            const finalContent = data.payload;
+                            const lastTurn = prev[lastTurnIndex];
     
                             if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                                lastTurn.content = finalContent;
-                                lastTurn.isStreaming = false;
+                                // Update the last turn immutably
+                                const updatedTurn = { ...lastTurn, content: newTurnContent, isStreaming: false };
+                                const newConversation = [...prev.slice(0, lastTurnIndex), updatedTurn];
+                                return newConversation;
                             } else {
-                                newConversation.push({ role: 'model', content: finalContent, isStreaming: false });
+                                // Add a new turn to the conversation
+                                return [...prev, { role: 'model', content: newTurnContent, isStreaming: false }];
                             }
-                            return newConversation;
                         });
                     }
                 }

@@ -251,20 +251,40 @@ export class GeminiService implements OnModuleInit {
           }};
         }
       } else {
-        // For 'reply', just send the content string. For others, send the full payload.
-        if (action === 'reply' && parameters && typeof parameters.content === 'string') {
-           yield { type: 'final', payload: { action: 'reply', parameters: { content: parameters.content } } };
-        } else {
-           yield { type: 'final', payload: finalClientPayload };
+        // For 'reply', 'editFile', 'runCommand', just pass it to the client
+        yield { type: 'final', payload: finalClientPayload };
+      }
+    } catch (error) {
+      this.logger.error(`Error in generateResponse for user ${userId} in session ${currentSessionId}:`, error.stack);
+      
+      let userFriendlyMessage = '🤖 AI 모델 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+      if (error.message?.includes('429') || error.message?.includes('API key not valid')) {
+        userFriendlyMessage = '🤖 API 하루 사용량을 초과했습니다.';
+      }
+      
+      // This is the correct, simple payload structure the client expects for rendering.
+      const errorPayloadForClient = {
+        action: 'reply',
+        parameters: {
+          content: userFriendlyMessage
         }
+      };
+
+      // Create the payload to be saved in the database, which is a stringified version of the client payload.
+      const errorPayloadForDb = JSON.stringify(errorPayloadForClient);
+
+      if (currentSessionId) {
+        await this.prisma.conversation.create({
+          data: {
+            sessionId: currentSessionId,
+            role: 'model',
+            content: errorPayloadForDb,
+          },
+        });
       }
 
-    } catch (error) {
-      this.logger.error(`Error in generateResponse for user ${userId}:`, error);
-      yield {
-        type: 'error',
-        payload: { message: 'AI 모델 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' },
-      };
+      // Yield the correctly structured error to the client as a final message.
+      yield { type: 'final', payload: errorPayloadForClient };
     }
   }
 }
