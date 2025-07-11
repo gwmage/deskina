@@ -233,6 +233,11 @@ export class GeminiService implements OnModuleInit {
       }
 
       // 5. 처리된 최종 액션을 클라이언트에 보냅니다.
+      // runCommand 액션에 args가 없는 경우를 대비하여 기본값을 추가합니다.
+      if (actionForClient.action === 'runCommand' && !actionForClient.parameters.args) {
+        actionForClient.parameters.args = [];
+      }
+      
       if (actionForClient.action === 'reply') {
         // 'reply' 액션은 내용을 한 글자씩 스트리밍합니다.
         const content = actionForClient.parameters.content || '';

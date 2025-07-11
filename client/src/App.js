@@ -309,12 +309,12 @@ const App = () => {
   const [fileEditProposal, setFileEditProposal] = useState(null);
 
   const chatEndRef = useRef(null);
-  const abortControllerRef = new useRef(null);
+  const abortControllerRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const prevScrollHeightRef = useRef(null);
   const inputRef = useRef(null);
   
-  const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
+  const electronAPI = window.electronAPI;
 
   // Effect to auto-resize textarea
   useEffect(() => {
@@ -361,9 +361,7 @@ const App = () => {
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
-      // The content from the DB should be rendered as-is, without pre-parsing.
-      // The rendering logic in renderModelTurn will handle all parsing.
-      const formattedHistory = data.conversations.reverse(); 
+      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
 
       setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
       setTotalConversations(data.total);
@@ -400,13 +398,13 @@ const App = () => {
   };
 
   const handleAcceptEdit = async () => {
-    if (!fileEditProposal || !ipcRenderer) return;
+    if (!fileEditProposal || !electronAPI) return;
     const { filePath, newContent } = fileEditProposal;
-    const result = await ipcRenderer.invoke('writeFile', { filePath, content: newContent });
+    const result = await electronAPI.writeFile({ filePath, content: newContent });
     if (result.success) {
-      setConversation(prev => [...prev, { role: 'system', content: `✅ File "${filePath}" has been updated successfully.` }]);
+      setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `✅ File "${filePath}" has been updated successfully.` }]);
     } else {
-      setConversation(prev => [...prev, { role: 'system', content: `❌ Error updating file "${filePath}": ${result.error}` }]);
+      setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `❌ Error updating file "${filePath}": ${result.error}` }]);
     }
     setFileEditProposal(null);
   };
@@ -414,15 +412,18 @@ const App = () => {
   const handleRejectEdit = () => {
     if (!fileEditProposal) return;
     const { filePath } = fileEditProposal;
-    setConversation(prev => [...prev, { role: 'system', content: `File edit for "${filePath}" was rejected.` }]);
+    setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `File edit for "${filePath}" was rejected.` }]);
     setFileEditProposal(null);
   };
 
   const handleImageChange = (event) => {
+    console.log("File input changed");
     const file = event.target.files[0];
+    console.log("Selected file:", file);
     if (file && file.type.startsWith('image/')) {
       const reader = new FileReader();
       reader.onloadend = () => {
+        console.log("File reading complete");
         const base64String = reader.result.replace('data:', '').replace(/^.+,/, '');
         setImagePreview(reader.result);
         setImageBase64(base64String);
@@ -436,18 +437,7 @@ const App = () => {
     setImageBase64(null);
   };
   
-  const sendToolResult = useCallback(async (command, args, result) => {
-    console.log('Sending tool result:', { command, args, result });
-    await streamResponse(`${API_URL}/gemini/tool-result`, {
-        sessionId: currentSessionId,
-        command,
-        args,
-        result,
-    });
-  }, [currentSessionId]);
-
-  const streamResponse = useCallback(async (url, body) => {
-    abortControllerRef.current = new AbortController();
+  const streamResponse = useCallback(async (url, body, signal) => {
     setIsLoading(true);
     setError(null);
     try {
@@ -458,7 +448,7 @@ const App = () => {
           'Authorization': `Bearer ${user.token}`,
         },
         body: JSON.stringify(body),
-        signal: abortControllerRef.current.signal,
+        signal: signal,
       });
 
       if (!response.ok || !response.body) {
@@ -472,7 +462,7 @@ const App = () => {
 
       const processData = async () => {
         while (true) {
-          if (abortControllerRef.current.signal.aborted) {
+          if (signal.aborted) {
             reader.cancel();
             break;
           }
@@ -491,7 +481,6 @@ const App = () => {
             for (const line of jsonLines) {
               if (line.trim() === '') continue;
               try {
-                // SSE standard sends "data: " prefix, which must be removed before parsing.
                 const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
                 const data = JSON.parse(jsonString);
                 
@@ -507,7 +496,6 @@ const App = () => {
                     const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
 
                     if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                      // IMMUTABLE UPDATE: Create a new turn object instead of mutating the old one.
                       const updatedTurn = {
                         ...lastTurn,
                         content: lastTurn.content + data.payload,
@@ -515,15 +503,11 @@ const App = () => {
                       newConversation[lastTurnIndex] = updatedTurn;
                       return newConversation;
                     } else {
-                      // This part is already immutable as it pushes a new object.
                       newConversation.push({ id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true });
                       return newConversation;
                     }
                   });
                 } else if (data.type === 'final') {
-                    // This 'final' event can be a successful response from the model
-                    // OR a structured error message from our server's catch block.
-                    // The 'renderModelTurn' function is designed to correctly parse either.
                     const finalPayload = data.payload;
 
                     if (finalPayload.action === 'runCommand') {
@@ -531,75 +515,81 @@ const App = () => {
                          const newConversation = [...prev];
                          const lastTurn = newConversation[newConversation.length - 1];
                          if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                            if (lastTurn.content.trim() === '') {
+                               return newConversation.slice(0, -1);
+                            }
                            lastTurn.isStreaming = false;
                          }
                          return newConversation;
                       });
-                      if (ipcRenderer) {
-                        const result = await ipcRenderer.invoke('run-command', finalPayload.parameters);
-                        sendToolResult('runCommand', finalPayload.parameters, result);
+                      if (electronAPI) {
+                        const result = await electronAPI.runCommand(finalPayload.parameters);
+                        // After a tool runs, we need a new AbortController for the next stream
+                        const nextController = new AbortController();
+                        abortControllerRef.current = nextController;
+                        await streamResponse(
+                          `${API_URL}/gemini/tool-result`,
+                          { sessionId: currentSessionId, command: 'runCommand', args: finalPayload.parameters, result },
+                          nextController.signal
+                        );
                       } else {
-                        console.warn('ipcRenderer not available. Command not executed.');
-                        setConversation(prev => [...prev, { role: 'system', content: 'Command execution is not available in the web environment.' }]);
+                        console.warn('electronAPI not available. Command not executed.');
+                        setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: 'Command execution is not available in the web environment.' }]);
                       }
                     } else if (finalPayload.action === 'editFile') {
                         setConversation(prev => {
                           const newConversation = [...prev];
                           const lastTurn = newConversation[newConversation.length - 1];
                           if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                             if (lastTurn.content.trim() === '') {
+                               return newConversation.slice(0, -1);
+                             }
                             lastTurn.isStreaming = false;
                           }
                           return newConversation;
                         });
-                        // Start the file edit proposal process
-                        if (ipcRenderer) {
+                        if (electronAPI) {
                           setFileEditProposal({
                             ...finalPayload.parameters,
                             originalContent: 'loading',
                           });
                         } else {
-                          console.warn('ipcRenderer not available. File edit not possible.');
-                          setConversation(prev => [...prev, { role: 'system', content: 'File editing is not available in the web environment.' }]);
+                          console.warn('electronAPI not available. File edit not possible.');
+                          setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: 'File editing is not available in the web environment.' }]);
                         }
                     } else if (finalPayload.action === 'runScript') {
                         const { filePath, content } = finalPayload.parameters;
-                        
-                        if (ipcRenderer) {
-                          const fileCheck = await ipcRenderer.invoke('checkFileExists', filePath);
-                          
+                        if (electronAPI) {
+                          const fileCheck = await electronAPI.checkFileExists(filePath);
                           if (!fileCheck.exists) {
-                            // File doesn't exist, so write it first.
-                            await ipcRenderer.invoke('writeFile', { filePath, content });
-                            setConversation(prev => [...prev, { role: 'system', content: `📥 Script downloaded and saved to "${filePath}".` }]);
+                            await electronAPI.writeFile({ filePath, content });
+                            setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `📥 Script downloaded and saved to "${filePath}".` }]);
                           }
-                          
-                          // Now execute the script.
-                          const result = await ipcRenderer.invoke('run-command', { command: 'python', args: [filePath] });
-                          sendToolResult('runScript', finalPayload.parameters, result);
+                          const result = await electronAPI.runCommand({ command: 'python', args: [filePath] });
+                          const nextController = new AbortController();
+                          abortControllerRef.current = nextController;
+                          await streamResponse(
+                            `${API_URL}/gemini/tool-result`,
+                             { sessionId: currentSessionId, command: 'runScript', args: finalPayload.parameters, result },
+                             nextController.signal
+                          );
                         } else {
-                          console.warn('ipcRenderer not available. Script execution not possible.');
-                          setConversation(prev => [...prev, { role: 'system', content: 'Script execution is not available in the web environment.' }]);
+                          console.warn('electronAPI not available. Script execution not possible.');
+                          setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: 'Script execution is not available in the web environment.' }]);
                         }
                     } else { // Handles 'reply' action for both normal and error messages
                         setConversation(prev => {
-                            const lastTurnIndex = prev.length - 1;
-                            // Stringify the payload here to match the format of data loaded from DB.
-                            const newTurnContent = JSON.stringify(finalPayload);
+                            const newConversation = [...prev];
+                            const lastTurnIndex = newConversation.length - 1;
+                            const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
 
-                            if (lastTurnIndex < 0) { // No previous turns
-                                return [{ role: 'model', content: newTurnContent, isStreaming: false }];
-                            }
-                            
-                            const lastTurn = prev[lastTurnIndex];
-    
                             if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                                // Update the last turn immutably
-                                const updatedTurn = { ...lastTurn, content: newTurnContent, isStreaming: false };
-                                const newConversation = [...prev.slice(0, lastTurnIndex), updatedTurn];
+                                const updatedTurn = { ...lastTurn, isStreaming: false };
+                                newConversation[lastTurnIndex] = updatedTurn;
                                 return newConversation;
                             } else {
-                                // Add a new turn to the conversation
-                                return [...prev, { role: 'model', content: newTurnContent, isStreaming: false }];
+                                const newTurnContent = JSON.stringify(finalPayload);
+                                return [...prev, { id: `model-${Date.now()}`, role: 'model', content: newTurnContent, isStreaming: false }];
                             }
                         });
                     }
@@ -627,14 +617,16 @@ const App = () => {
       }
     } finally {
       setIsLoading(false);
-      abortControllerRef.current = null;
+      if (abortControllerRef.current && abortControllerRef.current.signal === signal) {
+        abortControllerRef.current = null;
+      }
     }
-  }, [user, sendToolResult, currentSessionId, ipcRenderer]);
+  }, [user, currentSessionId, electronAPI]);
 
   useEffect(() => {
-    if (fileEditProposal && fileEditProposal.originalContent === 'loading' && ipcRenderer) {
+    if (fileEditProposal && fileEditProposal.originalContent === 'loading' && electronAPI) {
       const fetchOriginalFile = async () => {
-        const result = await ipcRenderer.invoke('readFile', fileEditProposal.filePath);
+        const result = await electronAPI.readFile(fileEditProposal.filePath);
         if (result.success) {
           setFileEditProposal(prev => ({ ...prev, originalContent: result.content }));
         } else {
@@ -643,7 +635,7 @@ const App = () => {
       };
       fetchOriginalFile();
     }
-  }, [fileEditProposal, ipcRenderer]);
+  }, [fileEditProposal, electronAPI]);
 
   // Focus input on new conversation or when switching conversations
   useEffect(() => {
@@ -662,7 +654,7 @@ const App = () => {
     setImagePreview(null);
     setImageBase64(null);
 
-    const newTurn = { role: 'user', content: userMessage, imageBase64: imageBase64 };
+    const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64: imageBase64 };
     setConversation(prev => [...prev, newTurn]);
 
     let sessionIdToSend = currentSessionId;
@@ -671,13 +663,16 @@ const App = () => {
       setSessions(prev => [{ id: 'temp', title: userMessage.substring(0, 30) }, ...prev]);
       setCurrentSessionId('temp');
     }
+    
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     await streamResponse(`${API_URL}/gemini/generate`, {
       sessionId: sessionIdToSend,
       message: userMessage,
       platform: window.navigator.platform,
       imageBase64: imageBase64,
-    });
+    }, controller.signal);
   }, [input, imageBase64, currentSessionId, streamResponse]);
 
 
@@ -752,20 +747,28 @@ const App = () => {
   const renderTurn = (turn, index) => {
     if (turn.role === 'user') {
       return (
-        <div key={index} className="turn user">
-          <div className="turn-content">
-            {turn.content}
-            {turn.imageBase64 && <img src={`data:image/png;base64,${turn.imageBase64}`} alt="User upload" className="turn-image" />}
-          </div>
+        <div key={turn.id || index} className="turn user">
+          {turn.imageBase64 && (
+            <img 
+              src={`data:image/png;base64,${turn.imageBase64}`} 
+              alt="User upload" 
+              className="turn-image" 
+            />
+          )}
+          {turn.content && (
+            <div className="turn-content">
+              {turn.content}
+            </div>
+          )}
         </div>
       );
     }
     if (turn.role === 'model') {
-      return renderModelTurn(turn, index);
+      return renderModelTurn(turn, turn.id || index);
     }
     if (turn.role === 'system') {
        return (
-        <div key={index} className="turn system">
+        <div key={turn.id || index} className="turn system">
           <div className="turn-content">
             {turn.content}
           </div>
@@ -775,35 +778,30 @@ const App = () => {
     return null;
   };
   
-  const renderModelTurn = (turn, index) => {
+  const renderModelTurn = (turn, key) => {
     let contentToDisplay = '';
     
     try {
         let data = turn.content;
 
-        // Phase 1: Ensure `data` is a JS object/array if it's a JSON string.
         if (typeof data === 'string') {
             const trimmedData = data.trim();
             if ((trimmedData.startsWith('{') && trimmedData.endsWith('}')) || (trimmedData.startsWith('[') && trimmedData.endsWith(']'))) {
                 try {
                     data = JSON.parse(data);
                 } catch (e) {
-                    // Not valid JSON, so it's just a plain string. `data` remains a string.
                 }
             }
         }
 
-        // Phase 2: Extract the string for display from the (potentially parsed) `data`.
         if (typeof data === 'string') {
             contentToDisplay = data;
         } else if (Array.isArray(data)) {
-            // Handles cases where `data` is an array like [{"type": "text", ...}]
             contentToDisplay = data
                 .filter(part => part.type === 'text' && part.value)
                 .map(part => part.value)
                 .join('');
         } else if (typeof data === 'object' && data !== null) {
-            // Handles the specific nested structure from the user: { action: "reply", parameters: { content: [...] } }
             if (data.action === 'reply' && data.parameters && data.parameters.content) {
                 const innerContent = data.parameters.content;
                 if (Array.isArray(innerContent)) {
@@ -815,7 +813,6 @@ const App = () => {
                     contentToDisplay = innerContent;
                 }
             } else {
-                // It's another kind of object, probably a tool call. Stringify it for display.
                 contentToDisplay = '```json\n' + JSON.stringify(data.parameters || data, null, 2) + '\n```';
             }
         } else {
@@ -828,7 +825,7 @@ const App = () => {
     }
 
     return (
-      <div key={index} className="turn assistant">
+      <div key={key} className="turn assistant">
         <div className="turn-content">
           <ReactMarkdown
             children={contentToDisplay}

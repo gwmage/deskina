@@ -4,14 +4,11 @@ console.log('[Preload] Preload script starting...');
 
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
-contextBridge.exposeInMainWorld('electron', {
-  /**
-   * Executes a command in the main process.
-   * @param {string} command The command to execute.
-   * @param {string[]} args The arguments for the command.
-   * @returns {Promise<{success: boolean, output?: string, error?: string}>}
-   */
-  runCommand: (command, args) => ipcRenderer.invoke('run-command', { command, args }),
+contextBridge.exposeInMainWorld('electronAPI', {
+  runCommand: (params) => ipcRenderer.invoke('run-command', params),
+  writeFile: (params) => ipcRenderer.invoke('writeFile', params),
+  readFile: (filePath) => ipcRenderer.invoke('readFile', filePath),
+  checkFileExists: (filePath) => ipcRenderer.invoke('checkFileExists', filePath),
 });
 
-console.log('[Preload] window.electron API exposed.'); 
+console.log('[Preload] window.electronAPI exposed.'); 

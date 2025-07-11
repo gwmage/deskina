@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const isDev = require('electron-is-dev');
 const { spawn } = require('child_process');
+const { exec } = require('child_process');
+const { TextDecoder } = require('util');
 
 function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
@@ -68,39 +70,36 @@ app.on('activate', () => {
 // code. You can also put them in separate files and require them here.
 
 // Handle the 'run-command' event from the renderer process
-ipcMain.handle('run-command', async (event, { command, args }) => {
-  return new Promise((resolve, reject) => {
-    console.log(`[Main Process] Executing command: ${command} with args: ${args.join(' ')}`);
+ipcMain.handle('run-command', async (event, params) => {
+  // Robustly handle missing 'args'. If params.args is null or undefined, default to an empty array.
+  const command = params.command;
+  const args = params.args || [];
 
-    const child = spawn(command, args, {
-      shell: true, // Use shell to properly handle commands like 'npm' or 'code' on Windows
-      encoding: 'utf8'
-    });
+  console.log(`[Main] Received run-command: ${command}${args.length > 0 ? ' with args: ' + args.join(' ') : ''}`);
 
-    let stdout = '';
-    let stderr = '';
+  return new Promise((resolve) => {
+    // Use shell: true to better handle commands like 'dir' on Windows, which are shell built-ins.
+    exec(`${command} ${args.join(' ')}`, { shell: true, encoding: 'buffer' }, (error, stdout, stderr) => {
+      const outputDecoder = new TextDecoder('utf-8');
+      const errorDecoder = new TextDecoder(getWindowsEncoding());
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
+      const decodedStdout = outputDecoder.decode(stdout);
+      const decodedStderr = errorDecoder.decode(stderr);
 
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      console.log(`[Main Process] Command exited with code ${code}`);
-      if (code === 0) {
-        resolve({ success: true, output: stdout });
-      } else {
-        // Even if there's an error, stdout might contain useful info
-        resolve({ success: false, error: stderr, output: stdout });
+      if (error) {
+        console.error(`[Main] exec error for command '${command}': ${error.message}`);
+        resolve({
+          success: false,
+          stdout: decodedStdout,
+          stderr: `EXEC ERROR: ${error.message}\n\nSTDERR:\n${decodedStderr}`,
+        });
+        return;
       }
-    });
-
-    child.on('error', (err) => {
-      console.error('[Main Process] Failed to start subprocess.', err);
-      reject({ success: false, error: err.message });
+      resolve({
+        success: true,
+        stdout: decodedStdout,
+        stderr: decodedStderr,
+      });
     });
   });
 });
@@ -133,4 +132,13 @@ ipcMain.handle('checkFileExists', async (event, filePath) => {
   } catch {
     return { exists: false };
   }
-}); 
+});
+
+function getWindowsEncoding() {
+  // This function is needed to avoid a bug in the TextDecoder constructor
+  // when running on Windows. The default encoding for Windows is 'cp1252'.
+  // We need to explicitly set it to 'utf-8' for TextDecoder to work correctly.
+  // This is a workaround for a known issue in Electron.
+  // See: https://github.com/electron/electron/issues/21407
+  return 'utf-8';
+} 
