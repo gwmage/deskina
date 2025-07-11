@@ -335,18 +335,18 @@ body {
 
 .input-wrapper textarea {
   flex-grow: 1;
+  background: transparent;
   border: none;
   outline: none;
-  background-color: transparent;
-  color: var(--text-color);
-  font-family: inherit;
-  font-size: 1rem;
-  padding: 6px 10px; /* Adjusted padding for better vertical alignment */
   resize: none;
-  line-height: 1.5;
+  color: var(--text-color);
+  font-size: 1rem;
+  font-family: inherit;
+  padding: 14px 10px; /* Adjusted padding */
+  line-height: 1.5;   /* Added for vertical centering */
   max-height: 200px;
-  overflow-y: auto;
-  align-self: stretch; /* Make textarea fill the height */
+  min-height: 24px; /* Roughly 1rem * 1.5 line-height */
+  box-sizing: border-box;
 }
 
 .input-wrapper textarea::placeholder {
