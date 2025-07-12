@@ -52,88 +52,78 @@ export class SessionService {
   ) {
     const history = await this.prisma.conversation.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'desc' }, // 'desc' 순서 유지
       take: limit,
       skip: skip,
     });
 
     const clientHistory = [];
+    const processedIndices = new Set<number>();
+
     for (let i = 0; i < history.length; i++) {
+      if (processedIndices.has(i)) {
+        continue;
+      }
+
       const turn = history[i];
 
-      if (turn.role === 'model') {
+      if (
+        turn.role === 'tool' &&
+        i + 1 < history.length &&
+        history[i + 1].role === 'model'
+      ) {
+        const toolTurn = turn;
+        const modelTurn = history[i + 1];
+
         try {
-          const modelAction = JSON.parse(turn.content);
-          if (
-            modelAction.action === 'runCommand' ||
-            modelAction.action === 'runScript' ||
-            modelAction.action === 'readFile'
-          ) {
-            // This is a command action. Look for the result in the next turn.
-            if (i + 1 < history.length && history[i + 1].role === 'tool') {
-              const toolTurn = history[i + 1];
-              try {
-                // The content from a 'tool' role is a JSON string containing the 'functionResponse' object.
-                const toolContentObject = JSON.parse(toolTurn.content);
-                const commandResult = toolContentObject.functionResponse?.response;
+          const modelAction = JSON.parse(modelTurn.content);
 
-                if (commandResult) {
-                  // Let's create the 'action' turn display
-                  const commandStr =
-                    modelAction.action === 'runCommand'
-                      ? `${modelAction.parameters.command} ${modelAction.parameters.args.join(' ')}`
-                      : modelAction.action === 'runScript'
-                        ? `python ${modelAction.parameters.name}`
-                        : `${modelAction.parameters.filePath}`;
+          if (modelAction.action === 'runCommand' || modelAction.action === 'runScript' || modelAction.action === 'readFile') {
+            const toolContentObject = JSON.parse(toolTurn.content);
+            const commandResult = toolContentObject.functionResponse?.response;
 
-                  clientHistory.push({
-                    ...turn,
-                    id: turn.id + '-action',
-                    role: 'system',
-                    type: 'action',
-                    content: `> **${modelAction.action}**: \`${commandStr}\``,
-                  });
+            if (commandResult) {
+              const commandStr =
+                modelAction.action === 'runCommand'
+                  ? `${modelAction.parameters.command} ${modelAction.parameters.args.join(' ')}`
+                  : modelAction.action === 'runScript'
+                  ? `python ${modelAction.parameters.name}`
+                  : `${modelAction.parameters.filePath}`;
+              
+              // desc 배열을 유지하기 위해 push를 사용합니다.
+              // 클라이언트가 reverse() 할 것을 예상하여, result를 action보다 먼저 push 합니다.
+              clientHistory.push({
+                ...toolTurn,
+                id: toolTurn.id + '-result',
+                role: 'system',
+                type: 'action_result',
+                content: commandResult.success
+                  ? commandResult.stdout
+                  : commandResult.stderr || commandResult.error,
+                success: commandResult.success,
+              });
 
-                  // And the 'action_result' turn
-                  clientHistory.push({
-                    ...toolTurn,
-                    id: toolTurn.id + '-result',
-                    role: 'system',
-                    type: 'action_result',
-                    content: commandResult.success
-                      ? commandResult.stdout
-                      : commandResult.stderr || commandResult.error,
-                    success: commandResult.success,
-                  });
+              clientHistory.push({
+                ...modelTurn,
+                id: modelTurn.id + '-action',
+                role: 'system',
+                type: 'action',
+                content: `> **${modelAction.action}**: \`${commandStr}\``,
+              });
 
-                  // Skip the next turn since we've processed it
-                  i++;
-                  // Also skip the AI's summary text that follows the tool result, if it exists
-                  if (
-                    i + 1 < history.length &&
-                    history[i + 1].role === 'model'
-                  ) {
-                    i++;
-                  }
-                  continue; // Continue to the next iteration
-                }
-              } catch (e) {
-                this.logger.error(
-                  `Failed to parse tool turn content: ${toolTurn.content}`,
-                  e.stack,
-                );
-                // Fallthrough to add the problematic model turn as is
-              }
+              processedIndices.add(i);
+              processedIndices.add(i + 1);
+              continue;
             }
           }
         } catch (e) {
-          // Not a JSON action object, it's just a regular text message.
+          this.logger.warn(`Failed to process action/result pair: ${e}`);
         }
       }
 
-      // Default behavior: add the turn as is
       clientHistory.push(turn);
     }
+    // desc 순서의 배열을 그대로 반환합니다.
     return clientHistory;
   }
 

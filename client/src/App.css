@@ -553,15 +553,14 @@ body {
 
 .code-container pre {
   margin: 0;
-  padding: 12px;
-  padding-top: 8px; /* Extra padding to avoid header overlap */
+  padding: 1rem;
+  padding-top: 2.8rem; /* Space for the header */
+  overflow-x: auto;
+  overflow-y: auto; /* Allow vertical scrolling for long results */
+  max-height: 40vh; /* Prevent the block from becoming too tall */
   color: var(--text-color);
-  font-family: 'Fira Code', 'D2Coding', Consolas, 'Courier New', monospace;
-  font-size: 0.9em;
-  white-space: pre-wrap; /* Allows wrapping for long lines */
-  word-wrap: break-word; /* Breaks long words */
-  overflow-x: auto; /* Adds horizontal scroll for very long non-breakable lines */
-  max-width: 100%;
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .code-container code {
@@ -620,19 +619,29 @@ body {
 
 .command-content code,
 .command-result-content code {
-  font-family: inherit;
-  font-size: inherit;
-  white-space: inherit;
-  word-wrap: inherit;
+  font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
 }
 
-.command-result-container.error {
-  border: 1px solid var(--error-color);
+/* CLI Result Block (New Style) */
+.command-result-container {
+  /* 블록 전체가 너비를 차지하도록 설정 */
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box; /* 패딩과 테두리를 너비에 포함 */
 }
 
-.command-result-container.error .command-result-header {
-  background-color: rgba(248, 113, 113, 0.1);
-  color: var(--error-color);
+.command-result-container .code-container {
+  margin-top: 8px;
+}
+
+.command-result-container.error .code-header {
+  background-color: var(--error-color);
+  color: var(--background-color);
+}
+
+.command-result-container.success .code-header {
+  background-color: var(--success-color);
+  color: var(--background-color);
 }
 
 

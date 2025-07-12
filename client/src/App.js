@@ -7,7 +7,7 @@ import './App.css';
 const API_URL = 'http://localhost:3001';
 const MAX_MESSAGES = 100; // Keep the last 100 messages in view
 
-const CodeCopyBlock = ({ language, code }) => {
+const CodeCopyBlock = ({ language, code, headerText }) => {
   const [isCopied, setIsCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -23,7 +23,7 @@ const CodeCopyBlock = ({ language, code }) => {
   return (
     <div className="code-container">
       <div className="code-header">
-        <span>{language}</span>
+        <span>{headerText || language}</span>
         <button onClick={handleCopy} className="copy-button">
           {isCopied ? '✅' : '📋'}
         </button>
@@ -64,17 +64,14 @@ const CommandExecution = ({ command, args }) => {
   );
 };
 
-const CommandResult = ({ stdout, stderr }) => {
-  const hasError = stderr && stderr.trim() !== '';
+// 기존 CommandResult는 삭제하고 아래의 새 구현으로 대체합니다.
+const CommandResult = ({ success, content, ...props }) => {
+  const language = success ? 'bash' : 'error';
+  const headerText = success ? '✅ Command Result' : '❌ Command Failed';
+
   return (
-    <div className={`command-result-container ${hasError ? 'error' : ''}`}>
-      <div className="command-result-header">
-        <span className="command-result-icon">{hasError ? '❌' : '✅'}</span>
-        <span className="command-result-label">Command Result</span>
-      </div>
-      <pre className="command-result-content">
-        <code>{hasError ? stderr : stdout}</code>
-      </pre>
+    <div {...props} className={`command-result-container ${success ? 'success' : 'error'}`}>
+      <CodeCopyBlock language={language} code={content} headerText={headerText} />
     </div>
   );
 };
@@ -460,7 +457,7 @@ const App = () => {
 
       for (const line of jsonLines) {
         if (line.trim() === '') continue;
-        console.log('[App.js processStream] Raw line from server:', line); // 서버에서 온 데이터 로깅
+        // console.log('[App.js processStream] Raw line from server:', line); // 서버에서 온 데이터 로깅
         try {
           const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
           const data = JSON.parse(jsonString);
@@ -538,13 +535,19 @@ const App = () => {
   }, [token]);
 
 
-  const sendToolResult = useCallback(async (toolCallId, output) => {
-    if (!sessionIdRef.current) {
-      console.error('No session ID available for sending tool result');
+  const sendToolResult = useCallback(async (toolCallName, toolCallId, output) => {
+    // [진단] 이전 로그는 제거합니다.
+    console.log('[sendToolResult] Sending:', { toolCallName, toolCallId, sessionId: sessionIdRef.current });
+
+    if (!sessionIdRef.current || sessionIdRef.current === 'temp') {
+      console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
       return;
     }
+    
+    // AI의 후속 응답 스트림을 처리하기 위해 /gemini/generate를 호출합니다.
+    // tool-result 전용 엔드포인트 대신 기존 스트림 처리 로직을 재사용합니다.
     try {
-      const response = await fetch(`${API_URL}/gemini/tool-result`, {
+      const response = await fetch(`${API_URL}/gemini/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -552,16 +555,31 @@ const App = () => {
         },
         body: JSON.stringify({
           sessionId: sessionIdRef.current,
-          toolCallId,
-          output,
+          // message 필드 대신 tool_response를 보냅니다.
+          tool_response: {
+            name: toolCallName,
+            id: toolCallId,
+            result: output,
+          }
         }),
       });
+
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.message);
+        throw new Error(errorData.message || 'Failed to send tool result and get follow-up.');
       }
+      
+      // AI의 후속 응답 (예: "명령어를 실행했습니다.")을 스트리밍으로 처리합니다.
+      await processStream(response, sessionIdRef.current);
+
     } catch (error) {
-      console.error('Submission failed:', error);
+      console.error('Tool result submission or follow-up stream failed:', error);
+      // 사용자에게 에러를 표시하는 로직 추가 가능
+      setConversation(prev => [...prev, {
+        id: `error-${Date.now()}`,
+        role: 'system',
+        content: `Error processing tool result: ${error.message}`
+      }]);
     }
   }, [token, processStream]);
 
@@ -572,33 +590,37 @@ const App = () => {
       return;
     }
 
+    // UI에 '명령어 실행 중' 상태를 먼저 표시합니다.
+    const commandExecutionTurn = {
+      id: `exec-${toolCall.id}`,
+      role: 'system',
+      type: 'action',
+      content: `> **${toolCall.name}**: \`${toolCall.args.command} ${toolCall.args.args.join(' ')}\``,
+    };
+    setConversation(prev => [...prev, commandExecutionTurn]);
+
     if (toolCall.name === 'runCommand') {
-      const commandExecutionTurn = {
-        id: `tool-exec-${toolCall.id}`,
-        role: 'model',
-        content: JSON.stringify({ action: 'runCommand', parameters: toolCall.args })
-      };
-      setConversation(prev => [...prev, commandExecutionTurn]);
-      
       const result = await window.electronAPI.runCommand(toolCall.args);
       
-      const resultTurnContent = result.stderr && result.stderr.trim() ? `Error: ${result.stderr}` : `\`\`\`\n${result.stdout}\n\`\`\``;
       const resultTurn = {
-        id: `tool-result-${toolCall.id}`,
-        role: 'tool',
-        content: resultTurnContent
+        id: `result-${toolCall.id}`,
+        role: 'system',
+        type: 'action_result',
+        content: result.stdout || result.stderr || result.error,
+        success: result.success,
       };
       setConversation(prev => [...prev, resultTurn]);
-
-      sendToolResult(toolCall.id, JSON.stringify(result));
+      
+      sendToolResult(toolCall.name, toolCall.id, result);
 
     } else if (toolCall.name === 'editFile') {
+      // (이전 로직과 동일)
       const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
       setEditProposal({ ...toolCall.args, originalContent });
     } else if (toolCall.name === 'createScript') {
-      // Assuming createScript is also async and returns a result
+      // (이전 로직과 동일)
       const result = await window.electronAPI.createScript(toolCall.args);
-      sendToolResult(toolCall.id, JSON.stringify(result));
+      sendToolResult(toolCall.name, toolCall.id, result);
     }
   }, [sendToolResult]);
 
@@ -763,8 +785,20 @@ const App = () => {
         break;
 
       case 'system':
-        turnRoleClass = 'system';
-        turnContent = <div className="turn-content">{turn.content}</div>;
+        if (turn.type === 'action') {
+          turnRoleClass = 'system action-text';
+          turnContent = (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {turn.content}
+            </ReactMarkdown>
+          );
+        } else if (turn.type === 'action_result') {
+          // .turn div를 사용하지 않고 직접 CommandResult를 반환합니다.
+          return <CommandResult key={turn.id || index} success={turn.success} content={turn.content} />;
+        } else {
+          turnRoleClass = 'system';
+          turnContent = <div className="turn-content">{turn.content}</div>;
+        }
         break;
 
       default:
