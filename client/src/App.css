@@ -292,10 +292,16 @@ body {
   align-self: flex-start;
 }
 
+/* .turn.system의 가운데 정렬을 제거합니다. */
 .turn.system {
-  align-self: center;
+  /* align-self: center; */
+  align-self: flex-start; /* 다른 메시지처럼 왼쪽 정렬을 기본으로 합니다. */
 }
 
+/* action-text는 별도로 왼쪽 정렬을 명시합니다. */
+.turn.action-text {
+  align-self: flex-start;
+}
 
 .turn.user .turn-content {
   background-color: var(--accent-color);
@@ -505,12 +511,11 @@ body {
 
 /* Code Block styles from ReactMarkdown */
 .code-container {
-  background-color: var(--code-bg-color);
   border-radius: 8px;
-  margin: 8px 0;
+  border: 1px solid var(--border-color);
+  background-color: var(--code-bg-color);
   position: relative;
-  width: 100%;
-  overflow: hidden; /* Ensures the container itself clips content */
+  /* overflow: hidden; 를 제거하여 스크롤바가 잘리지 않도록 합니다. */
 }
 
 /* Add margin when code is a direct child of a turn, sibling to a p, etc. */
@@ -526,10 +531,12 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background-color: var(--background-light);
   padding: 8px 12px;
-  color: var(--text-secondary-color);
-  font-size: 0.85rem;
+  background-color: var(--background-light);
+  border-bottom: 1px solid var(--border-color);
+  /* 상단 모서리만 둥글게 처리합니다. */
+  border-top-left-radius: 7px; /* 부모 border-radius - 1px */
+  border-top-right-radius: 7px;
 }
 
 .code-header span {
@@ -561,6 +568,9 @@ body {
   color: var(--text-color);
   font-size: 0.9rem;
   line-height: 1.5;
+  /* 하단 모서리만 둥글게 처리합니다. */
+  border-bottom-left-radius: 7px;
+  border-bottom-right-radius: 7px;
 }
 
 .code-container code {
@@ -622,16 +632,24 @@ body {
   font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
 }
 
+/* action_result를 감싸는 .turn 블록의 자체 스타일은 제거 */
+.turn.action-result {
+  background: transparent;
+}
+
+/* Markdown blockquote의 기본 여백 제거 */
+.turn blockquote {
+  margin: 0;
+}
+
 /* CLI Result Block (New Style) */
 .command-result-container {
-  /* 블록 전체가 너비를 차지하도록 설정 */
   width: 100%;
-  max-width: 100%;
-  box-sizing: border-box; /* 패딩과 테두리를 너비에 포함 */
+  box-sizing: border-box;
 }
 
 .command-result-container .code-container {
-  margin-top: 8px;
+  margin-top: 0; /* command-result-container가 turn의 역할을 하므로 마진 제거 */
 }
 
 .command-result-container.error .code-header {

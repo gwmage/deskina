@@ -65,12 +65,12 @@ const CommandExecution = ({ command, args }) => {
 };
 
 // 기존 CommandResult는 삭제하고 아래의 새 구현으로 대체합니다.
-const CommandResult = ({ success, content, ...props }) => {
+const CommandResult = ({ success, content }) => {
   const language = success ? 'bash' : 'error';
   const headerText = success ? '✅ Command Result' : '❌ Command Failed';
 
   return (
-    <div {...props} className={`command-result-container ${success ? 'success' : 'error'}`}>
+    <div className={`command-result-container ${success ? 'success' : 'error'}`}>
       <CodeCopyBlock language={language} code={content} headerText={headerText} />
     </div>
   );
@@ -793,8 +793,8 @@ const App = () => {
             </ReactMarkdown>
           );
         } else if (turn.type === 'action_result') {
-          // .turn div를 사용하지 않고 직접 CommandResult를 반환합니다.
-          return <CommandResult key={turn.id || index} success={turn.success} content={turn.content} />;
+          turnRoleClass = 'system action-result';
+          turnContent = <CommandResult success={turn.success} content={turn.content} />;
         } else {
           turnRoleClass = 'system';
           turnContent = <div className="turn-content">{turn.content}</div>;
