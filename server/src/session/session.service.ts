@@ -52,7 +52,7 @@ export class SessionService {
   ) {
     const history = await this.prisma.conversation.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: 'desc' },
       take: limit,
       skip: skip,
     });

@@ -369,7 +369,7 @@ const App = () => {
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
-      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`}));
+      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
 
       setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
       setTotalConversations(data.total);
