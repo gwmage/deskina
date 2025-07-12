@@ -293,478 +293,355 @@ const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation
 
 
 const App = () => {
-  const [user, setUser] = useState(() => {
-    const token = localStorage.getItem('accessToken');
-    return token ? { token } : null;
-  });
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [token, setToken] = useState(null);
+  const [conversation, setConversation] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
-  const currentSessionIdRef = useRef(currentSessionId);
-  const [conversation, setConversation] = useState([]);
+  const sessionIdRef = useRef(null);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [error, setError] = useState(null);
-  const [imagePreview, setImagePreview] = useState(null);
+  const [editProposal, setEditProposal] = useState(null);
   const [imageBase64, setImageBase64] = useState(null);
-  const [page, setPage] = useState(1);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
-  const [totalConversations, setTotalConversations] = useState(0);
-  const [fileEditProposal, setFileEditProposal] = useState(null);
+  const [lastMessageId, setLastMessageId] = useState(null);
 
-  const chatEndRef = useRef(null);
+  const conversationRef = useRef(null);
   const abortControllerRef = useRef(null);
-  const scrollContainerRef = useRef(null);
   const prevScrollHeightRef = useRef(null);
-  const inputRef = useRef(null);
-  
-  const electronAPI = window.electronAPI;
 
-  // Effect to auto-resize textarea
-  useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto'; // Reset height to recalculate
-      inputRef.current.style.height = `${inputRef.current.scrollHeight}px`;
+  const fetchSessionHistory = useCallback(async (sessionId, page = 1, concat = false) => {
+    if (!sessionId || sessionId === 'temp') {
+      return;
     }
-  }, [input]);
-
-  useEffect(() => {
-    currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
-
-  const scrollToBottom = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  useEffect(scrollToBottom, [conversation]);
-
-  useLayoutEffect(() => {
-    if (scrollContainerRef.current && prevScrollHeightRef.current) {
-      scrollContainerRef.current.scrollTop += scrollContainerRef.current.scrollHeight - prevScrollHeightRef.current;
-      prevScrollHeightRef.current = null;
-    }
-  }, [conversation]);
-
-  const loadSessions = useCallback(async (token) => {
-    try {
-      const response = await fetch(`${API_URL}/sessions`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error('Failed to load sessions');
-      const data = await response.json();
-      setSessions(data);
-    } catch (err) {
-      console.error('Session loading error:', err);
-      setError('Failed to load your conversations.');
-    }
-  }, []);
-
-  const fetchSessionHistory = useCallback(async (sessionId, currentPage = 1, shouldConcat = false) => {
-    if (!sessionId || sessionId === 'temp') return;
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/sessions/${sessionId}/conversations?page=${currentPage}&limit=20`, {
-        headers: { 'Authorization': `Bearer ${user.token}` }
+      const response = await fetch(`${API_URL}/sessions/${sessionId}/conversations?page=${page}&limit=20`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (!response.ok) throw new Error('Failed to fetch session history');
+      if (!response.ok) {
+        throw new Error('Failed to fetch session history');
+      }
       const data = await response.json();
-      
       const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
 
-      setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
-      setTotalConversations(data.total);
-      setHasMore(data.conversations.length > 0 && (currentPage * 20 < data.total));
-      setPage(currentPage);
-    } catch (err) {
-      console.error('Fetch history error:', err);
-      setConversation([]);
-      setTotalConversations(0);
+      setConversation(prev => concat ? [...formattedHistory, ...prev] : formattedHistory);
+      setHasMore(data.conversations.length > 0 && (page * 20 < data.total));
+    } catch (error) {
+      console.error('Failed to fetch history:', error);
+      setConversation([]); // Clear on error
       setHasMore(false);
     } finally {
       setIsLoading(false);
     }
-  }, [user]);
+  }, [token]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('accessToken');
     if (storedToken) {
-      const userData = { token: storedToken };
-      setUser(userData);
-      loadSessions(storedToken);
+      setToken(storedToken);
+      setIsAuthenticated(true);
+      fetchSessions(storedToken);
     }
-  }, [loadSessions]);
+  }, []);
+
+  useEffect(() => {
+    // Fetch history when session changes, but not for new temporary sessions
+    if (currentSessionId && currentSessionId !== 'temp') {
+      fetchSessionHistory(currentSessionId, 1, false);
+    }
+  }, [currentSessionId, fetchSessionHistory]);
   
-  const handleStop = (isUserInitiated = false) => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+  useEffect(() => {
+    // Fetch more history when page changes (for "Load More")
+    if (currentPage > 1) {
+      fetchSessionHistory(currentSessionId, currentPage, true);
     }
-    setIsLoading(false);
-    if (isUserInitiated) {
-      console.log('User initiated stop.');
+  }, [currentPage]);
+
+  useEffect(() => {
+    sessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    const lastMessage = conversation[conversation.length - 1];
+    // If there's a new last message, scroll to it.
+    // This prevents scrolling when old messages are prepended.
+    if (lastMessage && lastMessage.id !== lastMessageId) {
+      scrollToBottom();
+      setLastMessageId(lastMessage.id);
     }
-  };
+  }, [conversation, lastMessageId]);
 
-  const handleAcceptEdit = async () => {
-    if (!fileEditProposal || !electronAPI) return;
-    const { filePath, newContent } = fileEditProposal;
-    const result = await electronAPI.writeFile({ filePath, content: newContent });
-    if (result.success) {
-      setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `✅ File "${filePath}" has been updated successfully.` }]);
-    } else {
-      setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `❌ Error updating file "${filePath}": ${result.error}` }]);
+  useLayoutEffect(() => {
+    // If we have a stored scroll height, it means we've just loaded more messages.
+    if (prevScrollHeightRef.current !== null && conversationRef.current) {
+      // Adjust scroll position to keep the view stable.
+      const scrollDifference = conversationRef.current.scrollHeight - prevScrollHeightRef.current;
+      conversationRef.current.scrollTop += scrollDifference;
+      prevScrollHeightRef.current = null; // Reset after adjustment
     }
-    setFileEditProposal(null);
-  };
+  }, [conversation]);
 
-  const handleRejectEdit = () => {
-    if (!fileEditProposal) return;
-    const { filePath } = fileEditProposal;
-    setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `File edit for "${filePath}" was rejected.` }]);
-    setFileEditProposal(null);
-  };
 
-  const handleImageChange = (event) => {
-    const input = event.target;
-    if (!input.files || input.files.length === 0) {
-      input.value = '';
-      return;
-    }
-
-    const file = input.files[0];
-    if (!file.type.startsWith('image/')) {
-      setError(`"${file.name}" is not a supported image file.`);
-      input.value = '';
-      return;
-    }
-
-    const reader = new FileReader();
-
-    reader.onloadend = () => {
-      const resultStr = reader.result;
-      setImagePreview(resultStr);
-      const base64String = resultStr.split(',')[1];
-      setImageBase64(base64String);
-      setError(null); 
-    };
-
-    reader.onerror = () => {
-      console.error("FileReader error:", reader.error);
-      setError("An error occurred while reading the selected file.");
-    };
-
-    reader.readAsDataURL(file);
-    input.value = '';
-  };
-
-  const handleRemoveImage = () => {
-    setImagePreview(null);
-    setImageBase64(null);
-  };
-  
-  const streamResponse = useCallback(async (url, body, signal) => {
-    setIsLoading(true);
-    setError(null);
+  const fetchSessions = async (authToken) => {
     try {
-      const response = await fetch(url, {
+      const response = await fetch(`${API_URL}/sessions`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      if (!response.ok) throw new Error('Failed to load sessions');
+      const data = await response.json();
+      setSessions(data);
+    } catch (error) {
+      console.error("Error fetching sessions:", error);
+    }
+  };
+
+  const scrollToBottom = () => {
+    if (conversationRef.current) {
+      conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
+    }
+  };
+
+  const processStream = useCallback(async (response, currentSessionId) => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.lastIndexOf('\n');
+      if (boundary === -1) continue;
+
+      const jsonLines = buffer.substring(0, boundary).split('\n');
+      buffer = buffer.substring(boundary + 1);
+
+      for (const line of jsonLines) {
+        if (line.trim() === '') continue;
+        try {
+          const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
+          const data = JSON.parse(jsonString);
+
+          if (data.type === 'session_id' && currentSessionId === 'temp') {
+            setCurrentSessionId(data.payload);
+            setSessions(prev =>
+              prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
+            );
+          } else if (data.type === 'text_chunk') {
+            setConversation(prev => {
+              const newConversation = [...prev];
+              const lastTurnIndex = newConversation.length - 1;
+              const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
+
+              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                const updatedTurn = {
+                  ...lastTurn,
+                  content: lastTurn.content + data.payload,
+                };
+                newConversation[lastTurnIndex] = updatedTurn;
+                return newConversation;
+              } else {
+                newConversation.push({ id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true });
+                return newConversation;
+              }
+            });
+          } else if (data.type === 'final') {
+            setConversation(prev => {
+              const newConversation = [...prev];
+              const lastTurn = newConversation[newConversation.length - 1];
+              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                if (lastTurn.content.trim() === '') {
+                  return newConversation.slice(0, -1);
+                }
+                lastTurn.isStreaming = false;
+              }
+              return newConversation;
+            });
+
+            const finalPayload = data.payload;
+            if (finalPayload.action === 'runCommand') {
+              executeToolCall(finalPayload.toolCall);
+            } else if (finalPayload.action === 'readFile') {
+              executeToolCall(finalPayload.toolCall);
+            } else if (finalPayload.action === 'editFile') {
+              setEditProposal({
+                ...finalPayload.parameters,
+                originalContent: 'loading',
+              });
+            } else if (finalPayload.action === 'runScript') {
+              executeToolCall(finalPayload.toolCall);
+            } else {
+              const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
+              setConversation(prev => {
+                return [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }];
+              });
+            }
+          }
+        } catch (e) {
+          console.error('Failed to parse JSON line:', line, e);
+        }
+      }
+    }
+  }, [token]);
+
+
+  const sendToolResult = useCallback(async (toolCallId, output) => {
+    if (!sessionIdRef.current) {
+      console.error('No session ID available for sending tool result');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/gemini/tool-result`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${user.token}`,
+          'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify(body),
-        signal: signal,
+        body: JSON.stringify({
+          sessionId: sessionIdRef.current,
+          toolCallId,
+          output,
+        }),
       });
-
-      if (!response.ok || !response.body) {
-        const errorData = await response.json().catch(() => ({ message: 'An unknown error occurred' }));
+      if (!response.ok) {
+        const errorData = await response.json();
         throw new Error(errorData.message);
       }
-      
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      const processData = async () => {
-        while (true) {
-          if (signal.aborted) {
-            reader.cancel();
-            break;
-          }
-          try {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            
-            let boundary = buffer.lastIndexOf('\n');
-            if (boundary === -1) continue;
-
-            const jsonLines = buffer.substring(0, boundary).split('\n');
-            buffer = buffer.substring(boundary + 1);
-
-            for (const line of jsonLines) {
-              if (line.trim() === '') continue;
-              try {
-                const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
-                const data = JSON.parse(jsonString);
-                
-                if (data.type === 'session_id' && currentSessionIdRef.current === 'temp') {
-                  setCurrentSessionId(data.payload);
-                  setSessions(prev =>
-                    prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
-                  );
-                } else if (data.type === 'text_chunk') {
-                  setConversation(prev => {
-                    const newConversation = [...prev];
-                    const lastTurnIndex = newConversation.length - 1;
-                    const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
-
-                    if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                      const updatedTurn = {
-                        ...lastTurn,
-                        content: lastTurn.content + data.payload,
-                      };
-                      newConversation[lastTurnIndex] = updatedTurn;
-                      return newConversation;
-                    } else {
-                      newConversation.push({ id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true });
-                      return newConversation;
-                    }
-                  });
-                } else if (data.type === 'final') {
-                    // Stop any "thinking" message now that we have a final action.
-                    setConversation(prev => {
-                      const newConversation = [...prev];
-                      const lastTurn = newConversation[newConversation.length - 1];
-                      if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                         if (lastTurn.content.trim() === '') {
-                           return newConversation.slice(0, -1);
-                         }
-                        lastTurn.isStreaming = false;
-                      }
-                      return newConversation;
-                    });
-                    
-                    const finalPayload = data.payload;
-
-                    if (finalPayload.action === 'runCommand' && electronAPI) {
-                      const { command, args } = finalPayload.parameters;
-                      
-                      setConversation(prev => [...prev, {
-                        id: `action-${Date.now()}`,
-                        type: 'action',
-                        content: `> **runCommand**: \`${command} ${args.join(' ')}\``
-                      }]);
-
-                      const result = await electronAPI.runCommand({ command, args });
-                      
-                      setConversation(prev => [...prev, {
-                        id: `action-result-${Date.now()}`,
-                        type: 'action_result',
-                        content: result.success ? result.stdout : result.stderr,
-                        success: result.success
-                      }]);
-
-                      const nextController = new AbortController();
-                      abortControllerRef.current = nextController;
-
-                      await streamResponse(
-                        `${API_URL}/gemini/tool-result`,
-                        {
-                          sessionId: currentSessionIdRef.current,
-                          command: "runCommand",
-                          args: args,
-                          result: result,
-                        },
-                        nextController.signal
-                      );
-                    } else if (finalPayload.action === 'readFile' && electronAPI) {
-                      const { filePath } = finalPayload.parameters;
-                      
-                      setConversation(prev => [...prev, {
-                        id: `action-${Date.now()}`,
-                        type: 'action',
-                        content: `> **readFile**: \`${filePath}\``
-                      }]);
-
-                      const result = await electronAPI.readFile({ filePath });
-                      
-                      const nextController = new AbortController();
-                      abortControllerRef.current = nextController;
-
-                      await streamResponse(
-                        `${API_URL}/gemini/tool-result`,
-                        {
-                          sessionId: currentSessionIdRef.current,
-                          command: "readFile",
-                          args: { filePath },
-                          result: result,
-                        },
-                        nextController.signal
-                      );
-                    } else if (finalPayload.action === 'editFile' && electronAPI) {
-                        setFileEditProposal({
-                          ...finalPayload.parameters,
-                          originalContent: 'loading',
-                        });
-                    } else if (finalPayload.action === 'runScript' && electronAPI) {
-                        const { filePath, content } = finalPayload.parameters;
-                        const fileCheck = await electronAPI.checkFileExists(filePath);
-                        if (!fileCheck.exists) {
-                          await electronAPI.writeFile({ filePath, content });
-                          setConversation(prev => [...prev, { id: `system-${Date.now()}`, role: 'system', content: `📥 Script downloaded and saved to "${filePath}".` }]);
-                        }
-                        const result = await electronAPI.runCommand({ command: 'python', args: [filePath] });
-                        const nextController = new AbortController();
-                        abortControllerRef.current = nextController;
-                        await streamResponse(
-                          `${API_URL}/gemini/tool-result`,
-                           { sessionId: currentSessionIdRef.current, command: 'runScript', args: finalPayload.parameters, result },
-                           nextController.signal
-                        );
-                    } else { 
-                        const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
-                        setConversation(prev => {
-                          return [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }];
-                        });
-                    }
-                }
-              } catch (e) {
-                console.error('Failed to parse JSON line:', line, e);
-              }
-            }
-          } catch (err) {
-            if (err.name !== 'AbortError') {
-              console.error('Error reading stream:', err);
-              setError('Error processing stream from server.');
-            }
-            break;
-          }
-        }
-      };
-      
-      await processData();
-
-    } catch (err) {
-      if (err.name !== 'AbortError') {
-        setError(err.message);
-        console.error('Streaming error:', err);
-      }
-    } finally {
-      setIsLoading(false);
-      if (abortControllerRef.current && abortControllerRef.current.signal === signal) {
-        abortControllerRef.current = null;
-      }
+    } catch (error) {
+      console.error('Submission failed:', error);
     }
-  }, [user, electronAPI]);
+  }, [token, processStream]);
 
-  useEffect(() => {
-    if (fileEditProposal && fileEditProposal.originalContent === 'loading' && electronAPI) {
-      const fetchOriginalFile = async () => {
-        const result = await electronAPI.readFile(fileEditProposal.filePath);
-        if (result.success) {
-          setFileEditProposal(prev => ({ ...prev, originalContent: result.content }));
-        } else {
-          setFileEditProposal(prev => ({ ...prev, originalContent: `Error: ${result.error}` }));
-        }
-      };
-      fetchOriginalFile();
+
+  const executeToolCall = useCallback(async (toolCall) => {
+    if (toolCall.name === 'runCommand') {
+      const result = await window.electron.runCommand(toolCall.args);
+      console.log('Command output:', result.stdout || result.stderr);
+      sendToolResult(toolCall.id, JSON.stringify({
+          stdout: result.stdout,
+          stderr: result.stderr,
+      }));
+    } else if (toolCall.name === 'editFile') {
+      const originalContent = await window.electron.readFile(toolCall.args.filePath);
+      setEditProposal({
+        ...toolCall.args,
+        originalContent,
+      });
+    } else if (toolCall.name === 'createScript') {
+      const result = await window.electron.createScript(toolCall.args);
+      sendToolResult(toolCall.id, JSON.stringify(result));
     }
-  }, [fileEditProposal, electronAPI]);
-
-  // Focus input on new conversation or when switching conversations
-  useEffect(() => {
-    if (!isLoading) {
-      inputRef.current?.focus();
-    }
-  }, [currentSessionId, isLoading]);
-
-
-  const executeTurn = useCallback(async () => {
-    const userMessage = input.trim();
-    if (!userMessage && !imageBase64) return;
-
-    handleStop();
-    setInput('');
-    setImagePreview(null);
-    setImageBase64(null);
-
-    const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64: imageBase64 };
-    setConversation(prev => [...prev, newTurn]);
-
-    let sessionIdToSend = currentSessionId;
-    if (!sessionIdToSend) {
-      sessionIdToSend = 'temp';
-      setSessions(prev => [{ id: 'temp', title: userMessage.substring(0, 30) }, ...prev]);
-      setCurrentSessionId('temp');
-    }
-    
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    await streamResponse(`${API_URL}/gemini/generate`, {
-      sessionId: sessionIdToSend,
-      message: userMessage,
-      platform: window.navigator.platform,
-      imageBase64: imageBase64,
-    }, controller.signal);
-  }, [input, imageBase64, currentSessionId, streamResponse]);
-
+  }, [sendToolResult]);
 
   const handleNewConversation = () => {
     setIsLoading(false);
-    handleStop(true);
     setConversation([]);
     setCurrentSessionId(null);
     setInput('');
     setImagePreview(null);
     setImageBase64(null);
-    setPage(1);
     setHasMore(true);
-    setTotalConversations(0);
-    setError(null);
+    setCurrentPage(1);
   };
 
   const handleSessionClick = (sessionId) => {
     if (sessionId === currentSessionId) return;
-    handleStop(true);
     setCurrentSessionId(sessionId);
-    setConversation([]);
-    fetchSessionHistory(sessionId, 1);
+    setConversation([]); // Clear existing conversation
+    setHasMore(true); // Reset hasMore for the new session
+    setCurrentPage(1); // Reset to the first page
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (isLoading) {
-      handleStop(true);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      setIsLoading(false);
     } else {
-      executeTurn();
+      const userMessage = input.trim();
+      if (!userMessage && !imageBase64) return;
+
+      setInput('');
+      setImagePreview(null);
+      setImageBase64(null);
+
+      const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64: imageBase64 };
+      setConversation(prev => [...prev, newTurn]);
+
+      let sessionIdToSend = currentSessionId;
+      if (!sessionIdToSend) {
+        sessionIdToSend = 'temp';
+        setSessions(prev => [{ id: 'temp', title: userMessage.substring(0, 30) }, ...prev]);
+        setCurrentSessionId('temp');
+      }
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      fetch(`${API_URL}/gemini/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          sessionId: sessionIdToSend,
+          message: userMessage,
+          platform: window.navigator.platform,
+          imageBase64: imageBase64,
+        }),
+        signal: controller.signal,
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error('Failed to generate response');
+        }
+        processStream(response, sessionIdToSend);
+      })
+      .catch(error => {
+        console.error('Error:', error);
+      })
+      .finally(() => {
+        setIsLoading(false);
+        if (abortControllerRef.current && abortControllerRef.current.signal === controller.signal) {
+          abortControllerRef.current = null;
+        }
+      });
     }
-    inputRef.current?.focus();
   };
 
   const handleLoadMore = () => {
-    if (!hasMore || isLoading) return;
-    prevScrollHeightRef.current = scrollContainerRef.current?.scrollHeight;
-    fetchSessionHistory(currentSessionId, page + 1, true);
+    if (conversationRef.current) {
+      // Store the scroll height *before* new content is added.
+      prevScrollHeightRef.current = conversationRef.current.scrollHeight;
+    }
+    setCurrentPage(prev => prev + 1);
   };
 
   const handleLogout = () => {
-    setUser(null);
     localStorage.removeItem('accessToken');
-    setSessions([]);
+    setIsAuthenticated(false);
+    setToken(null);
     setConversation([]);
+    setSessions([]);
     setCurrentSessionId(null);
   };
 
   const handleLoginSuccess = (token) => {
     localStorage.setItem('accessToken', token);
-    const userData = { token };
-    setUser(userData);
-    loadSessions(token);
+    setToken(token);
+    setIsAuthenticated(true);
+    fetchSessions(token);
   };
-  
+
   const renderWelcomeScreen = () => (
     <div className="welcome-screen">
       <div className="auth-logo">
@@ -784,64 +661,43 @@ const App = () => {
     let turnRoleClass = '';
     let turnContent = null;
 
-    switch (turn.role) {
-      case 'user':
-        turnRoleClass = 'user';
-        turnContent = (
-          <>
-            {turn.imageBase64 && (
-              <img 
-                src={`data:image/png;base64,${turn.imageBase64}`} 
-                alt="User upload" 
-                className="turn-image" 
-              />
-            )}
-            {turn.content && <div className="turn-content">{turn.content}</div>}
-          </>
-        );
-        break;
-      case 'model':
-        turnRoleClass = 'assistant';
-        turnContent = renderModelTurn(turn);
-        break;
-      case 'system':
-        if (turn.type === 'action') {
-          turnRoleClass = 'action-turn';
+    // Handle special action/result types first, regardless of role
+    if (turn.type === 'action') {
+      turnRoleClass = 'action-turn';
+      turnContent = <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content}</ReactMarkdown>;
+    } else if (turn.type === 'action_result') {
+      turnRoleClass = `action-result-turn ${!turn.success && 'error'}`;
+      const codeContent = turn.content ? String(turn.content).replace(/^```\w*\n|```$/g, '') : '';
+      turnContent = <CodeCopyBlock language="bash" code={codeContent} />;
+    } else {
+      // Handle standard roles
+      switch (turn.role) {
+        case 'user':
+          turnRoleClass = 'user';
           turnContent = (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {turn.content}
-            </ReactMarkdown>
+            <>
+              {turn.imageBase64 && (
+                <img 
+                  src={`data:image/png;base64,${turn.imageBase64}`} 
+                  alt="User upload" 
+                  className="turn-image" 
+                />
+              )}
+              {turn.content && <div className="turn-content">{turn.content}</div>}
+            </>
           );
-        } else if (turn.type === 'action_result') {
-          turnRoleClass = `action-result-turn ${!turn.success && 'error'}`;
-          const codeContent = turn.content
-            ? turn.content.replace(/^```\w*\n|```$/g, '')
-            : '';
-          turnContent = <CodeCopyBlock language="bash" code={codeContent} />;
-        } else {
+          break;
+        case 'model':
+          turnRoleClass = 'assistant';
+          turnContent = renderModelTurn(turn);
+          break;
+        case 'system':
           turnRoleClass = 'system';
           turnContent = <div className="turn-content">{turn.content}</div>;
-        }
-        break;
-      default:
-        // This part might now be less likely to be hit for these types,
-        // but kept as a fallback.
-        if (turn.type === 'action') {
-          turnRoleClass = 'action-turn';
-          turnContent = (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {turn.content}
-            </ReactMarkdown>
-          );
-        } else if (turn.type === 'action_result') {
-          turnRoleClass = `action-result-turn ${!turn.success && 'error'}`;
-          const codeContent = turn.content
-            ? turn.content.replace(/^```\w*\n|```$/g, '')
-            : '';
-          turnContent = <CodeCopyBlock language="bash" code={codeContent} />;
-        } else {
+          break;
+        default:
           return null; // Or a fallback UI
-        }
+      }
     }
 
     return (
@@ -913,7 +769,7 @@ const App = () => {
   const lastTurn = conversation[conversation.length - 1];
   const isCurrentlyStreaming = lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming;
 
-  if (!user) {
+  if (!isAuthenticated) {
     return <AuthPage onLoginSuccess={handleLoginSuccess} />;
   }
 
@@ -934,10 +790,10 @@ const App = () => {
                 <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
         </button>
-        <div className="conversation" ref={scrollContainerRef}>
+        <div className="conversation" ref={conversationRef}>
           {conversation.length === 0 && !isLoading && renderWelcomeScreen()}
           
-          {hasMore && totalConversations > conversation.length && (
+          {hasMore && (
             <div className="load-more-container">
               <button onClick={handleLoadMore} disabled={isLoading}>
                 Load More Conversations
@@ -956,18 +812,16 @@ const App = () => {
               </div>
             </div>
           )}
-          <div ref={chatEndRef} />
         </div>
         <div className="input-area">
           <div className="input-wrapper">
             {imagePreview && (
               <div className="image-preview-container">
                 <img src={imagePreview} alt="Preview" className="image-preview" />
-                <button onClick={handleRemoveImage} className="remove-image-button">×</button>
+                <button onClick={() => setImagePreview(null)} className="remove-image-button">×</button>
               </div>
             )}
             <textarea
-              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -983,14 +837,24 @@ const App = () => {
               disabled={isLoading}
             />
             <label htmlFor="file-upload" className="attach-button">📎</label>
-            <input id="file-upload" type="file" accept="image/*" onChange={handleImageChange} style={{ display: 'none' }} />
+            <input id="file-upload" type="file" accept="image/*" onChange={(e) => {
+              const file = e.target.files[0];
+              if (file) {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  setImagePreview(reader.result);
+                  setImageBase64(reader.result.split(',')[1]);
+                };
+                reader.readAsDataURL(file);
+              }
+            }} style={{ display: 'none' }} />
             <button onClick={handleSubmit} disabled={isLoading || !input.trim()}>
               {isLoading ? '■' : '▶'}
             </button>
           </div>
         </div>
       </main>
-      <EditFileProposal proposal={fileEditProposal} onAccept={handleAcceptEdit} onReject={handleRejectEdit} />
+      <EditFileProposal proposal={editProposal} onAccept={() => {}} onReject={() => setEditProposal(null)} />
     </div>
   );
 };

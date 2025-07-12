@@ -195,7 +195,7 @@ body {
   padding-top: 5rem; /* Increased padding to avoid overlap with toggle button */
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1rem; /* Consistent spacing between all turns */
 }
 
 .welcome-screen {
@@ -236,17 +236,14 @@ body {
 
 /* --- Chat Turns (Bubbles) --- */
 .turn {
-  margin-bottom: 0; /* Use flex gap instead */
-  border-radius: 8px;
+  padding: 14px 20px;
+  border-radius: 12px;
+  /* margin-bottom is now handled by the parent's gap property */
+  max-width: 90%;
   line-height: 1.6;
-  opacity: 0;
-  transform: translateY(10px);
-  animation: fadeIn 0.3s ease-out forwards;
-  max-width: 75%; /* New, consistent, and reduced max-width for ALL turns */
-  min-width: 0; /* CRITICAL for flexbox item shrinking */
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
+  animation: fadeIn 0.3s ease-in-out;
+  min-width: 0; /* Prevents flex items from overflowing their container */
+  display: block; /* Ensure turns stack vertically */
 }
 
 .action-turn {
@@ -260,9 +257,6 @@ body {
 
 .action-result-turn {
   margin: 0;
-  opacity: 0;
-  transform: translateY(10px);
-  animation: fadeIn 0.3s ease-out forwards;
   width: 100%;
 }
 
@@ -314,6 +308,10 @@ body {
   margin: 0;
   background-color: var(--background-light);
   border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
+}
+
+.turn.assistant > p:not(:last-child) {
+  margin-bottom: 0.5rem;
 }
 
 
@@ -508,12 +506,11 @@ body {
 /* Code Block styles from ReactMarkdown */
 .code-container {
   background-color: var(--code-bg-color);
-  border: 1px solid var(--border-color);
   border-radius: 8px;
-  /* margin: 1rem 0; */ /* Removed to be more specific below */
+  margin: 8px 0;
   position: relative;
-  width: 100%; /* Ensure it takes full available width */
-  box-sizing: border-box;
+  width: 100%;
+  overflow: hidden; /* Ensures the container itself clips content */
 }
 
 /* Add margin when code is a direct child of a turn, sibling to a p, etc. */
@@ -556,19 +553,78 @@ body {
 
 .code-container pre {
   margin: 0;
-  padding: 1rem;
-  padding-top: 3.5rem; /* Space for the header */
-  overflow-x: auto; /* Enable horizontal scrolling for long code lines */
+  padding: 12px;
+  padding-top: 8px; /* Extra padding to avoid header overlap */
+  color: var(--text-color);
+  font-family: 'Fira Code', 'D2Coding', Consolas, 'Courier New', monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap; /* Allows wrapping for long lines */
+  word-wrap: break-word; /* Breaks long words */
+  overflow-x: auto; /* Adds horizontal scroll for very long non-breakable lines */
+  max-width: 100%;
 }
 
 .code-container code {
-  font-family: 'Fira Code', monospace, 'Malgun Gothic', 'Dotum', sans-serif;
+  font-family: inherit;
   white-space: pre; /* Let <pre> handle wrapping and scrolling */
   word-break: normal; /* Do not break words in code */
   font-size: 0.9em;
   display: block;
 }
 
+/* Command & Result specific styles */
+.command-container,
+.command-result-container {
+  display: block;
+  background-color: #2a2a2e;
+  border-radius: 8px;
+  font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.command-container {
+  margin-bottom: 8px; /* Spacing between command and result */
+}
+
+.command-header,
+.command-result-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  background-color: var(--background-light);
+  color: var(--text-secondary-color);
+  font-size: 13px;
+}
+
+.command-icon,
+.command-result-icon {
+  margin-right: 8px;
+}
+
+.command-label,
+.command-result-label {
+  font-weight: 500;
+}
+
+.command-content,
+.command-result-content {
+  margin: 0;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-x: auto;
+  color: var(--text-color);
+}
+
+.command-content code,
+.command-result-content code {
+  font-family: inherit;
+  font-size: inherit;
+  white-space: inherit;
+  word-wrap: inherit;
+}
 
 /* --- Edit File Proposal Modal --- */
 .edit-proposal-overlay {
