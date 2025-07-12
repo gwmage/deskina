@@ -460,6 +460,7 @@ const App = () => {
 
       for (const line of jsonLines) {
         if (line.trim() === '') continue;
+        console.log('[App.js processStream] Raw line from server:', line); // 서버에서 온 데이터 로깅
         try {
           const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
           const data = JSON.parse(jsonString);
@@ -488,28 +489,31 @@ const App = () => {
               }
             });
           } else if (data.type === 'final') {
-            const latestConversation = conversationStateRef.current;
-            const lastTurn = latestConversation[latestConversation.length - 1];
-            const streamingModelTurn = (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) ? lastTurn : null;
+            const finalPayload = data.payload;
 
+            // Stop any visual streaming indicators
             setConversation(prev => {
               const newConversation = [...prev];
-              const currentLastTurn = newConversation[newConversation.length - 1];
-              if (currentLastTurn && currentLastTurn.role === 'model' && currentLastTurn.isStreaming) {
-                 if (currentLastTurn.content.trim() === '') {
+              const lastTurn = newConversation[newConversation.length - 1];
+              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                 if (lastTurn.content.trim() === '') {
+                  // If the streaming turn was empty, remove it
                   return newConversation.slice(0, -1);
                 }
-                currentLastTurn.isStreaming = false;
+                // Mark the streaming as finished
+                lastTurn.isStreaming = false;
               }
               return newConversation;
             });
 
-            const finalPayload = data.payload;
-
-            if (finalPayload.action && streamingModelTurn) {
-              const toolCall = {
+            // If the final payload contains an action, execute it.
+            if (finalPayload.action) {
+               // We need a toolCallId. We can generate one, but it's better
+               // if the server provides it. For now, we'll use the id of the last message.
+               const lastMessage = conversationStateRef.current[conversationStateRef.current.length - 1];
+               const toolCall = {
                 name: finalPayload.action,
-                id: streamingModelTurn.id,
+                id: lastMessage ? lastMessage.id : `tool-call-${Date.now()}`,
                 args: finalPayload.parameters
               };
 
@@ -522,6 +526,7 @@ const App = () => {
                  setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }]);
               }
             } else if (finalPayload.parameters?.content) {
+              // This case handles final text-only replies if any.
               setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
             }
           }
