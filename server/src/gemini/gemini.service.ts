@@ -34,6 +34,21 @@ const runCommandTool: FunctionDeclaration = {
   },
 };
 
+const readFileTool: FunctionDeclaration = {
+  name: 'readFile',
+  description: "Reads the entire content of a file at a specified path.",
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      filePath: {
+        type: SchemaType.STRING,
+        description: "The absolute or relative path to the file.",
+      },
+    },
+    required: ['filePath'],
+  },
+};
+
 const createScriptTool: FunctionDeclaration = {
   name: 'createScript',
   description: 'Creates a new Python script file and saves it.',
@@ -82,7 +97,7 @@ const runScriptTool: FunctionDeclaration = {
 };
 
 const tools: Tool[] = [
-  { functionDeclarations: [runCommandTool, createScriptTool, listScriptsTool, runScriptTool] },
+  { functionDeclarations: [runCommandTool, readFileTool, createScriptTool, listScriptsTool, runScriptTool] },
 ];
 
 @Injectable()
@@ -110,10 +125,15 @@ export class GeminiService {
 
 Core Directives:
 1.  **Mandatory Tool Use:** Your ONLY way to interact with the user's system is by calling one of the provided functions. You are strictly forbidden from responding with a raw JSON code block that mimics a function call. To execute a command, you MUST call the \`runCommand\` function. Do not just write out the JSON for the arguments.
-2.  **Proactive Execution:** When a user provides a file path or a task, immediately use a tool to inspect, analyze, or operate on it. Do not ask for information you can find yourself.
-3.  **Tool Structure Adherence:** You MUST strictly follow the format for each tool. For \`runCommand\`, the \`command\` parameter is for the command only (e.g., "dir", "ls"), and \`args\` is an array of strings for its arguments. Do NOT put the command inside the \`args\` array. For file paths in \`args\`, provide the raw path string without adding any quotes yourself; the system will handle quoting automatically.
-4.  **Intelligent Error Handling:** If a \`runCommand\` execution fails, do not give up. Analyze the error message (e.g., 'file not found', 'access denied') and try a different, logical command to solve the user's request. If you are stuck after a few tries, explain the issue and ask the user for clarification.
-5.  **Language:** All responses must be in Korean.`;
+2.  **Source Code Analysis Workflow:** When asked to analyze a directory or project, you must follow this sequence:
+    a. Use the \`runCommand\` tool (e.g., \`dir /B\` on Windows, \`ls\` on macOS/Linux) to list all files and subdirectories.
+    b. Identify the relevant source code files from the list.
+    c. Use the \`readFile\` tool sequentially for each identified file to read its content.
+    d. After reading all necessary files, synthesize the information and provide a comprehensive analysis or summary to the user. Do not give up if there are many files; read them one by one as requested.
+3.  **Proactive Execution:** When a user provides a file path or a task, immediately use a tool to inspect, analyze, or operate on it. Do not ask for information you can find yourself.
+4.  **Tool Structure Adherence:** You MUST strictly follow the format for each tool. For \`runCommand\`, the \`command\` parameter is for the command only (e.g., "dir", "ls"), and \`args\` is an array of strings for its arguments. For file paths in \`args\` or \`filePath\`, provide the raw path string without adding any quotes yourself; the system will handle quoting automatically.
+5.  **Intelligent Error Handling:** If a tool execution fails, do not give up. Analyze the error message and try a different, logical approach to solve the user's request.
+6.  **Language:** All responses must be in Korean.`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -178,6 +198,10 @@ Core Directives:
       else if (name === 'runCommand') {
         const commandArgs = args as { command: string; args: string[] };
         actionForClient = { action: 'runCommand', parameters: commandArgs };
+      }
+      else if (name === 'readFile') {
+        const fileArgs = args as { filePath: string };
+        actionForClient = { action: 'readFile', parameters: fileArgs };
       }
       else {
         this.logger.warn(`Unknown tool called: ${name}`);

@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Part } from '@google/generative-ai';
-import { PrismaService } from 'src/prisma.service';
+import { PrismaService } from '../prisma.service';
 
 @Injectable()
 export class SessionService {
+  private readonly logger = new Logger(SessionService.name);
   constructor(private prisma: PrismaService) {}
 
   async create(title: string, userId: string) {
@@ -65,50 +66,68 @@ export class SessionService {
           const modelAction = JSON.parse(turn.content);
           if (
             modelAction.action === 'runCommand' ||
-            modelAction.action === 'runScript'
+            modelAction.action === 'runScript' ||
+            modelAction.action === 'readFile'
           ) {
             // This is a command action. Look for the result in the next turn.
             if (i + 1 < history.length && history[i + 1].role === 'tool') {
               const toolTurn = history[i + 1];
               try {
-                const toolResult = JSON.parse(toolTurn.content);
-                const commandResult = toolResult.functionResponse?.response;
+                // The content from a 'tool' role is a JSON string containing the 'functionResponse' object.
+                const toolContentObject = JSON.parse(toolTurn.content);
+                const commandResult = toolContentObject.functionResponse?.response;
 
                 if (commandResult) {
-                  // Create the action turn
+                  // Let's create the 'action' turn display
                   const commandStr =
                     modelAction.action === 'runCommand'
                       ? `${modelAction.parameters.command} ${modelAction.parameters.args.join(' ')}`
-                      : `python ${modelAction.parameters.name}`;
+                      : modelAction.action === 'runScript'
+                        ? `python ${modelAction.parameters.name}`
+                        : `${modelAction.parameters.filePath}`;
+
                   clientHistory.push({
                     ...turn,
-                    role: 'system', // Use a role the client can handle generically
-                    type: 'action', // Custom type for the client
+                    id: turn.id + '-action',
+                    role: 'system',
+                    type: 'action',
                     content: `> **${modelAction.action}**: \`${commandStr}\``,
                   });
 
-                  // Create the action_result turn
+                  // And the 'action_result' turn
                   clientHistory.push({
                     ...toolTurn,
-                    role: 'system', // Use a role the client can handle generically
-                    type: 'action_result', // Custom type for the client
+                    id: toolTurn.id + '-result',
+                    role: 'system',
+                    type: 'action_result',
                     content: commandResult.success
                       ? commandResult.stdout
-                      : commandResult.stderr,
+                      : commandResult.stderr || commandResult.error,
                     success: commandResult.success,
                   });
 
                   // Skip the next turn since we've processed it
                   i++;
+                  // Also skip the AI's summary text that follows the tool result, if it exists
+                  if (
+                    i + 1 < history.length &&
+                    history[i + 1].role === 'model'
+                  ) {
+                    i++;
+                  }
                   continue; // Continue to the next iteration
                 }
               } catch (e) {
-                // Failed to parse tool turn, fall through to default behavior
+                this.logger.error(
+                  `Failed to parse tool turn content: ${toolTurn.content}`,
+                  e.stack,
+                );
+                // Fallthrough to add the problematic model turn as is
               }
             }
           }
         } catch (e) {
-          // Not a JSON action object, fall through to default behavior
+          // Not a JSON action object, it's just a regular text message.
         }
       }
 

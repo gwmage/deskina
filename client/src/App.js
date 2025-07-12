@@ -579,6 +579,30 @@ const App = () => {
                         },
                         nextController.signal
                       );
+                    } else if (finalPayload.action === 'readFile' && electronAPI) {
+                      const { filePath } = finalPayload.parameters;
+                      
+                      setConversation(prev => [...prev, {
+                        id: `action-${Date.now()}`,
+                        type: 'action',
+                        content: `> **readFile**: \`${filePath}\``
+                      }]);
+
+                      const result = await electronAPI.readFile({ filePath });
+                      
+                      const nextController = new AbortController();
+                      abortControllerRef.current = nextController;
+
+                      await streamResponse(
+                        `${API_URL}/gemini/tool-result`,
+                        {
+                          sessionId: currentSessionIdRef.current,
+                          command: "readFile",
+                          args: { filePath },
+                          result: result,
+                        },
+                        nextController.signal
+                      );
                     } else if (finalPayload.action === 'editFile' && electronAPI) {
                         setFileEditProposal({
                           ...finalPayload.parameters,
