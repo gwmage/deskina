@@ -1,0 +1,13 @@
+.copy-button:hover {
+  color: var(--text-color);
+}
+
+.code-container pre {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.code-container code {
+  font-family: 'Fira Code', 'Courier New', monospace;
+} 

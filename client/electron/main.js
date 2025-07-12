@@ -5,6 +5,7 @@ const isDev = require('electron-is-dev');
 const { spawn } = require('child_process');
 const { exec } = require('child_process');
 const { TextDecoder } = require('util');
+const iconv = require('iconv-lite');
 
 function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
@@ -71,20 +72,34 @@ app.on('activate', () => {
 
 // Handle the 'run-command' event from the renderer process
 ipcMain.handle('run-command', async (event, params) => {
-  // Robustly handle missing 'args'. If params.args is null or undefined, default to an empty array.
   const command = params.command;
   const args = params.args || [];
+  
+  const processedArgs = args.map(arg => {
+    // If arg contains spaces and is not already quoted, quote it.
+    if (arg.includes(' ') && !/^".*"$/.test(arg) && !/^'.*'$/.test(arg)) {
+      return `"${arg}"`;
+    }
+    return arg;
+  });
 
-  console.log(`[Main] Received run-command: ${command}${args.length > 0 ? ' with args: ' + args.join(' ') : ''}`);
+  const fullCommand = `${command} ${processedArgs.join(' ')}`;
+  console.log(`[Main] Executing command: ${fullCommand}`);
 
   return new Promise((resolve) => {
-    // Use shell: true to better handle commands like 'dir' on Windows, which are shell built-ins.
-    exec(`${command} ${args.join(' ')}`, { shell: true, encoding: 'buffer' }, (error, stdout, stderr) => {
-      const outputDecoder = new TextDecoder('utf-8');
-      const errorDecoder = new TextDecoder(getWindowsEncoding());
+    exec(fullCommand, { shell: true, encoding: 'buffer' }, (error, stdout, stderr) => {
+      const shellEncoding = getShellEncoding();
+      let decodedStdout;
+      let decodedStderr;
 
-      const decodedStdout = outputDecoder.decode(stdout);
-      const decodedStderr = errorDecoder.decode(stderr);
+      if (shellEncoding === 'cp949') {
+        decodedStdout = iconv.decode(stdout, shellEncoding);
+        decodedStderr = iconv.decode(stderr, shellEncoding);
+      } else {
+        const decoder = new TextDecoder(shellEncoding);
+        decodedStdout = decoder.decode(stdout);
+        decodedStderr = decoder.decode(stderr);
+      }
 
       if (error) {
         console.error(`[Main] exec error for command '${command}': ${error.message}`);
@@ -134,11 +149,6 @@ ipcMain.handle('checkFileExists', async (event, filePath) => {
   }
 });
 
-function getWindowsEncoding() {
-  // This function is needed to avoid a bug in the TextDecoder constructor
-  // when running on Windows. The default encoding for Windows is 'cp1252'.
-  // We need to explicitly set it to 'utf-8' for TextDecoder to work correctly.
-  // This is a workaround for a known issue in Electron.
-  // See: https://github.com/electron/electron/issues/21407
-  return 'utf-8';
+function getShellEncoding() {
+  return process.platform === 'win32' ? 'cp949' : 'utf-8';
 } 

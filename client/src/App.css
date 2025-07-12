@@ -236,35 +236,87 @@ body {
 
 /* --- Chat Turns (Bubbles) --- */
 .turn {
+  margin-bottom: 0; /* Use flex gap instead */
+  border-radius: 8px;
+  line-height: 1.6;
+  opacity: 0;
+  transform: translateY(10px);
+  animation: fadeIn 0.3s ease-out forwards;
+  max-width: 75%; /* New, consistent, and reduced max-width for ALL turns */
+  min-width: 0; /* CRITICAL for flexbox item shrinking */
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  max-width: 85%;
 }
 
+.action-turn {
+  background-color: var(--background-color-light);
+  color: var(--text-color-secondary);
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+  padding: 0.5rem 1rem;
+  border-left: 3px solid var(--accent-color);
+}
+
+.action-result-turn {
+  margin: 0;
+  opacity: 0;
+  transform: translateY(10px);
+  animation: fadeIn 0.3s ease-out forwards;
+  width: 100%;
+}
+
+.action-result-turn .code-container {
+  margin: 0;
+  border-radius: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.action-result-turn.error .code-container {
+  border: 1px solid var(--error-color);
+}
+
+.action-result-turn.error .code-header {
+  background-color: rgba(248, 113, 113, 0.1);
+  color: var(--error-color);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.action-result-turn:not(.error) .code-container {
+  border: 1px solid var(--border-color);
+}
+
+/* --- Alignment Overrides --- */
 .turn.user {
   align-self: flex-end;
-  align-items: flex-end; /* Add this to align children (image, bubble) to the right */
 }
+
+.turn.assistant,
+.turn.action-result-turn,
+.turn.action-turn {
+  align-self: flex-start;
+}
+
+.turn.system {
+  align-self: center;
+}
+
+
 .turn.user .turn-content {
   background-color: var(--accent-color);
   color: #fff;
   border-radius: 1.25rem 1.25rem 0.25rem 1.25rem;
 }
 
-.turn.assistant {
-  align-self: flex-start;
-}
-.turn.assistant .turn-content {
+.turn.assistant > p {
+  padding: 0.8rem 1.2rem;
+  margin: 0;
   background-color: var(--background-light);
   border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
 }
 
-.turn.system {
-  align-self: center;
-  width: 100%;
-  text-align: center;
-  max-width: 95%;
-}
+
 .turn.system .turn-content {
   background-color: transparent;
   color: var(--text-secondary-color);
@@ -278,9 +330,9 @@ body {
   padding: 0.8rem 1.2rem;
   line-height: 1.6;
   white-space: pre-wrap;
-  overflow-wrap: break-word;
-  max-width: 100%; /* 부모(.turn)의 너비를 넘지 않도록 설정 */
-  box-sizing: border-box; /* 패딩이 너비에 포함되도록 설정 */
+  word-wrap: break-word;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .turn-image {
@@ -313,6 +365,13 @@ body {
 @keyframes bounce {
   0%, 80%, 100% { transform: scale(0); }
   40% { transform: scale(1.0); }
+}
+
+@keyframes fadeIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 
@@ -441,19 +500,30 @@ body {
 }
 
 .input-wrapper button:disabled {
-  background-color: var(--border-color);
-  color: var(--text-secondary-color);
+  background-color: #3a3a3a;
+  color: #777;
   cursor: not-allowed;
 }
 
 /* Code Block styles from ReactMarkdown */
 .code-container {
   background-color: var(--code-bg-color);
-  border-radius: 8px;
-  margin: 1rem 0;
-  overflow: hidden;
   border: 1px solid var(--border-color);
+  border-radius: 8px;
+  /* margin: 1rem 0; */ /* Removed to be more specific below */
+  position: relative;
+  width: 100%; /* Ensure it takes full available width */
+  box-sizing: border-box;
 }
+
+/* Add margin when code is a direct child of a turn, sibling to a p, etc. */
+.turn > .code-container {
+  margin-top: 1rem;
+}
+.turn > p + .code-container {
+  margin-top: 1rem;
+}
+
 
 .code-header {
   display: flex;
@@ -487,15 +557,16 @@ body {
 .code-container pre {
   margin: 0;
   padding: 1rem;
-  overflow-x: auto;
+  padding-top: 3.5rem; /* Space for the header */
+  overflow-x: auto; /* Enable horizontal scrolling for long code lines */
 }
 
 .code-container code {
-  font-family: 'Fira Code', 'Courier New', monospace;
-  font-size: 0.9rem;
-  line-height: 1.5;
-  white-space: pre-wrap; /* 긴 코드 라인이 자동으로 줄바꿈 되도록 변경 */
-  word-break: break-all; /* 단어 중간에서도 줄바꿈 허용 */
+  font-family: 'Fira Code', monospace, 'Malgun Gothic', 'Dotum', sans-serif;
+  white-space: pre; /* Let <pre> handle wrapping and scrolling */
+  word-break: normal; /* Do not break words in code */
+  font-size: 0.9em;
+  display: block;
 }
 
 

@@ -4,6 +4,9 @@ import {
   HarmBlockThreshold,
   Part,
   ChatSession,
+  FunctionDeclaration,
+  Tool,
+  SchemaType,
 } from '@google/generative-ai';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
@@ -11,165 +14,190 @@ import { SessionService } from '../session/session.service';
 import { ScriptsService } from '../scripts/scripts.service';
 import { Response } from 'express';
 
+const runCommandTool: FunctionDeclaration = {
+  name: 'runCommand',
+  description: 'Executes a shell command on the user\'s local machine.',
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      command: {
+        type: SchemaType.STRING,
+        description: 'The command to execute (e.g., "ls", "dir", "python").',
+      },
+      args: {
+        type: SchemaType.ARRAY,
+        description: 'An array of arguments for the command.',
+        items: { type: SchemaType.STRING },
+      },
+    },
+    required: ['command'],
+  },
+};
+
+const createScriptTool: FunctionDeclaration = {
+  name: 'createScript',
+  description: 'Creates a new Python script file and saves it.',
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      name: {
+        type: SchemaType.STRING,
+        description: 'The name of the script file (e.g., "analyze.py").',
+      },
+      description: {
+        type: SchemaType.STRING,
+        description: 'A brief description of what the script does.',
+      },
+      code: {
+        type: SchemaType.STRING,
+        description: 'The Python code content of the script.',
+      },
+    },
+    required: ['name', 'code'],
+  },
+};
+
+const listScriptsTool: FunctionDeclaration = {
+  name: 'listScripts',
+  description: 'Lists all available scripts the user has created.',
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {},
+  },
+};
+
+const runScriptTool: FunctionDeclaration = {
+  name: 'runScript',
+  description: 'Executes a previously created Python script by its name.',
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      name: {
+        type: SchemaType.STRING,
+        description: 'The name of the script to execute.',
+      },
+    },
+    required: ['name'],
+  },
+};
+
+const tools: Tool[] = [
+  { functionDeclarations: [runCommandTool, createScriptTool, listScriptsTool, runScriptTool] },
+];
+
 @Injectable()
 export class GeminiService {
-  private readonly model: any;
   private readonly logger = new Logger(GeminiService.name);
+  private genAI: GoogleGenerativeAI;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly sessionService: SessionService,
     private readonly scriptsService: ScriptsService,
   ) {
-    this.model = new GoogleGenerativeAI(
-      process.env.GEMINI_API_KEY,
-    ).getGenerativeModel({
+    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  }
+
+  private getModelWithTools() {
+    return this.genAI.getGenerativeModel({
       model: 'gemini-1.5-flash-latest',
-      generationConfig: { responseMimeType: 'application/json' },
+      tools: tools,
     });
   }
 
   private getSystemPrompt(platform: string): string {
-    return `You are "Deskina," an AI agent in a desktop app on ${platform}. Your goal is to help users by running local commands. You must respond with a single JSON function call. If a command fails, analyze the error and try a different command or ask for clarification. Do not retry the same failed command. Available actions: runCommand(command, args), editFile(filePath, newContent), createScript(name, description, code), listScripts(), runScript(name), reply(content).`;
+    return `You are "Deskina," an AI agent designed to operate within a user's desktop environment on ${platform}. Your primary function is to assist users by executing tasks on their local machine.
+
+Core Directives:
+1.  **Mandatory Tool Use:** Your ONLY way to interact with the user's system is by calling one of the provided functions. You are strictly forbidden from responding with a raw JSON code block that mimics a function call. To execute a command, you MUST call the \`runCommand\` function. Do not just write out the JSON for the arguments.
+2.  **Proactive Execution:** When a user provides a file path or a task, immediately use a tool to inspect, analyze, or operate on it. Do not ask for information you can find yourself.
+3.  **Tool Structure Adherence:** You MUST strictly follow the format for each tool. For \`runCommand\`, the \`command\` parameter is for the command only (e.g., "dir", "ls"), and \`args\` is an array of strings for its arguments. Do NOT put the command inside the \`args\` array. For file paths in \`args\`, provide the raw path string without adding any quotes yourself; the system will handle quoting automatically.
+4.  **Intelligent Error Handling:** If a \`runCommand\` execution fails, do not give up. Analyze the error message (e.g., 'file not found', 'access denied') and try a different, logical command to solve the user's request. If you are stuck after a few tries, explain the issue and ask the user for clarification.
+5.  **Language:** All responses must be in Korean.`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
     return { inlineData: { data: base64, mimeType } };
   }
 
-  private async streamFinalResult(
-    res: Response,
-    userId: string,
-    sessionId: string,
-    action: any,
-    usage: any,
-  ) {
-    if (action.action === 'runCommand' && !action.parameters.args) {
-      action.parameters.args = [];
-    }
-    
-    await this.sessionService.addConversation(
-      sessionId,
-      'model',
-      JSON.stringify(action),
-    );
-
-    if (usage) {
-      await this.prisma.tokenUsage.create({
-        data: {
-          userId,
-          sessionId: sessionId,
-          modelName: 'gemini-1.5-flash',
-          promptTokens: usage.promptTokenCount,
-          completionTokens: usage.candidatesTokenCount || 0,
-          totalTokens: usage.totalTokenCount,
-        },
-      });
-    }
-
-    if (action.action === 'reply') {
-      const content = action.parameters.content || '';
-      for (const char of content) {
-        res.write(`data: ${JSON.stringify({ type: 'text_chunk', payload: char })}\n\n`);
-        await new Promise((r) => setTimeout(r, 10));
-      }
-    } else {
-      res.write(`data: ${JSON.stringify({ type: 'final', payload: action })}\n\n`);
-    }
-  }
-  
-  private async handleServerSideActions(userId: string, action: any) {
-    if (action.action === 'createScript') {
-      const { name, description, code } = action.parameters;
-      await this.scriptsService.create({ userId, name, description, filePath: `scripts/${name}.py`, content: code });
-      return { action: 'reply', parameters: { content: `✅ Script "${name}" created.` } };
-    }
-    if (action.action === 'listScripts') {
-      const scripts = await this.scriptsService.findAllForUser(userId);
-      const content = scripts.length > 0
-        ? `### Available Scripts\n\n${scripts.map(s => `- **${s.name}**`).join('\n')}`
-        : "No scripts found.";
-      return { action: 'reply', parameters: { content } };
-    }
-    if (action.action === 'runScript') {
-        const script = await this.prisma.script.findUnique({ where: { userId_name: { userId, name: action.parameters.name } } });
-        if (script) {
-            return { action: 'runScript', parameters: script };
-        } else {
-            return { action: 'reply', parameters: { content: `❌ Script "${action.parameters.name}" not found.` } };
-        }
-    }
-    return action;
-  }
-
-  private async executeChat(
+  private async executeAndRespond(
     res: Response,
     userId: string,
     sessionId: string,
     chat: ChatSession,
-    parts: Part[],
+    initialParts: Part[],
   ) {
-    try {
-      const result = await chat.sendMessageStream(parts);
-      let rawResponseText = '';
-      for await (const chunk of result.stream) {
-        rawResponseText += chunk.text();
-      }
-      
-      let finalAction;
-      try {
-        finalAction = JSON.parse(rawResponseText);
-      } catch (e) {
-        this.logger.warn('Failed to parse AI response as JSON, treating as text.', rawResponseText);
-        finalAction = { action: 'reply', parameters: { content: rawResponseText || 'Received an unusual response from the AI.' } };
-      }
+    let result = await chat.sendMessage(initialParts);
 
-      // --- AI 응답 정규화 시작 ---
-      
-      // 1단계: AI가 액션 계획(배열)을 보냈다면, 첫 번째 액션을 먼저 추출합니다.
-      if (Array.isArray(finalAction.actions) && finalAction.actions.length > 0) {
-        this.logger.log(`AI proposed a multi-action plan. Executing the first action.`);
-        finalAction = finalAction.actions[0];
-      }
-
-      // 2단계: 추출된 액션(또는 단일 액션)의 형식을 표준 포맷으로 통일합니다.
-      if (finalAction.function && !finalAction.action) {
-        // 'function' 키를 'action'으로 변환
-        this.logger.log(`Normalizing AI response: 'function' key found.`);
-        const { function: functionName, ...parameters } = finalAction;
-        finalAction = { action: functionName, parameters: parameters };
-      } else if (finalAction.reply && !finalAction.action) {
-        // 'reply' 키를 'action: "reply"'로 변환
-        this.logger.log(`Normalizing AI response: 'reply' key found.`);
-        finalAction = { action: 'reply', parameters: { content: finalAction.reply } };
-      }
-
-      // 최종 안전장치: 위 모든 과정을 거쳐도 'action' 키가 없다면, 전체를 텍스트로 간주합니다.
-      if (!finalAction.action) {
-        this.logger.warn('Could not determine a valid action. Defaulting to text reply.', JSON.stringify(finalAction));
-        finalAction = { action: 'reply', parameters: { content: JSON.stringify(finalAction) }};
-      }
-
-      // --- AI 응답 정규화 종료 ---
-
-      const clientAction = await this.handleServerSideActions(userId, finalAction);
-
-      const usage = (await result.response)?.usageMetadata;
-      await this.streamFinalResult(res, userId, sessionId, clientAction, usage);
-
-    } catch (error) {
-        this.logger.error(`Error during AI chat execution for user ${userId} in session ${sessionId}:`, error.stack);
-        const userMessage = error.message?.includes('429') 
-            ? 'API usage limit exceeded.'
-            : 'An error occurred while processing the AI response.';
-        const errorAction = { action: 'reply', parameters: { content: userMessage } };
-        await this.streamFinalResult(res, userId, sessionId, errorAction, null);
-    } finally {
-        if (!res.writableEnded) {
-            res.end();
+    while (true) {
+      const call = result.response.functionCalls()?.[0];
+      if (!call) {
+        // AI가 도구를 호출하지 않고 텍스트로만 응답한 경우
+        const text = result.response.text();
+        await this.sessionService.addConversation(sessionId, 'model', text);
+        
+        // 텍스트를 스트리밍하여 클라이언트에 전송
+        for (const char of text) {
+          res.write(`data: ${JSON.stringify({ type: 'text_chunk', payload: char })}\n\n`);
+          await new Promise((r) => setTimeout(r, 5));
         }
+        break; // 루프 종료
+      }
+
+      // AI가 도구를 호출한 경우, 해당 도구를 실행합니다.
+      const { name, args } = call;
+      this.logger.log(`AI called tool: ${name}`, args);
+      
+      let actionForClient: { action: string; parameters: any; };
+      let toolResultPayload: any;
+
+      if (name === 'listScripts') {
+        const scripts = await this.scriptsService.findAllForUser(userId);
+        toolResultPayload = { scripts: scripts.map(s => s.name) };
+      } 
+      else if (name === 'createScript') {
+        const scriptArgs = args as { name: string; description: string; code: string };
+        await this.scriptsService.create({
+          userId,
+          name: scriptArgs.name,
+          description: scriptArgs.description,
+          filePath: `scripts/${scriptArgs.name}`,
+          content: scriptArgs.code,
+        });
+        toolResultPayload = { success: true, message: `Script "${scriptArgs.name}" created.` };
+      } 
+      else if (name === 'runScript') {
+        const scriptArgs = args as { name: string };
+        const script = await this.prisma.script.findUnique({ where: { userId_name: { userId, name: scriptArgs.name } } });
+        if (script) {
+          actionForClient = { action: 'runScript', parameters: script };
+        } else {
+          toolResultPayload = { success: false, error: `Script "${scriptArgs.name}" not found.` };
+        }
+      }
+      else if (name === 'runCommand') {
+        const commandArgs = args as { command: string; args: string[] };
+        actionForClient = { action: 'runCommand', parameters: commandArgs };
+      }
+      else {
+        this.logger.warn(`Unknown tool called: ${name}`);
+        toolResultPayload = { success: false, error: `Unknown tool: ${name}` };
+      }
+      
+      if (actionForClient) {
+        // 클라이언트 측 실행이 필요한 도구 (runCommand, runScript)
+        await this.sessionService.addConversation(sessionId, 'model', JSON.stringify(actionForClient));
+        res.write(`data: ${JSON.stringify({ type: 'final', payload: actionForClient })}\n\n`);
+        break; 
+      } else {
+        // 서버 측에서 실행이 완료된 도구
+        result = await chat.sendMessage([
+          { functionResponse: { name, response: toolResultPayload } },
+        ]);
+      }
     }
   }
+
 
   async generateResponse(
     userId: string,
@@ -187,7 +215,7 @@ export class GeminiService {
       }
 
       const history = await this.sessionService.getConversations(sessionId);
-      const chat = this.model.startChat({
+      const chat = this.getModelWithTools().startChat({
         history: history,
         systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt(platform) }] },
       });
@@ -199,38 +227,54 @@ export class GeminiService {
       
       await this.sessionService.addConversation(sessionId, 'user', message, imageBase64);
 
-      await this.executeChat(res, userId, sessionId, chat, userParts);
+      await this.executeAndRespond(res, userId, sessionId, chat, userParts);
       
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId}:`, error.stack);
       if (!res.writableEnded) {
         res.status(500).json({ message: "Failed to generate response." });
       }
+    } finally {
+      if (!res.writableEnded) {
+        res.end();
+      }
     }
   }
 
   async handleToolResult(
     userId: string,
-    body: { sessionId: string; command: string; args: any; result: any },
+    body: { sessionId: string; command:string; args: any; result: any },
     res: Response,
   ) {
-    const { sessionId, command, result } = body;
-    const userMessage = `\`${command}\` executed.\n\nResult:\n\`\`\`sh\n${result.stdout || result.stderr || 'No output'}\n\`\`\``;
+    const { sessionId, command, args, result } = body;
+    
+    const toolExecutionResult: Part = {
+      functionResponse: {
+        name: command, 
+        response: result,
+      },
+    };
 
     try {
-        await this.sessionService.addConversation(sessionId, 'user', userMessage);
+        await this.sessionService.addConversation(sessionId, 'tool', JSON.stringify(toolExecutionResult));
         
         const history = await this.sessionService.getConversations(sessionId);
-        const chat = this.model.startChat({
-            history: history,
-            systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt('win32') }] }, // Platform might need to be stored/retrieved
+        const chat = this.getModelWithTools().startChat({
+            history: history.slice(0, -1), // 마지막 tool 응답은 제외하고 history 구성
+            systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt('win32') }] }, 
         });
 
-        await this.executeChat(res, userId, sessionId, chat, [{ text: userMessage }]);
+        // tool 응답을 다음 메시지로 전달
+        await this.executeAndRespond(res, userId, sessionId, chat, [toolExecutionResult]);
+
     } catch (error) {
         this.logger.error(`Error handling tool result for user ${userId}:`, error.stack);
         if (!res.writableEnded) {
             res.status(500).json({ message: "Failed to handle tool result." });
+        }
+    } finally {
+        if (!res.writableEnded) {
+            res.end();
         }
     }
   }
