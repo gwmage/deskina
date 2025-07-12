@@ -626,6 +626,16 @@ body {
   word-wrap: inherit;
 }
 
+.command-result-container.error {
+  border: 1px solid var(--error-color);
+}
+
+.command-result-container.error .command-result-header {
+  background-color: rgba(248, 113, 113, 0.1);
+  color: var(--error-color);
+}
+
+
 /* --- Edit File Proposal Modal --- */
 .edit-proposal-overlay {
   position: fixed;

@@ -49,6 +49,37 @@ const CodeBlock = ({node, inline, className, children, ...props}) => {
   );
 };
 
+const CommandExecution = ({ command, args }) => {
+  const fullCommand = `${command} ${args.join(' ')}`;
+  return (
+    <div className="command-container">
+      <div className="command-header">
+        <span className="command-icon">⚡️</span>
+        <span className="command-label">Executing Command</span>
+      </div>
+      <pre className="command-content">
+        <code>{fullCommand}</code>
+      </pre>
+    </div>
+  );
+};
+
+const CommandResult = ({ stdout, stderr }) => {
+  const hasError = stderr && stderr.trim() !== '';
+  return (
+    <div className={`command-result-container ${hasError ? 'error' : ''}`}>
+      <div className="command-result-header">
+        <span className="command-result-icon">{hasError ? '❌' : '✅'}</span>
+        <span className="command-result-label">Command Result</span>
+      </div>
+      <pre className="command-result-content">
+        <code>{hasError ? stderr : stdout}</code>
+      </pre>
+    </div>
+  );
+};
+
+
 const EditFileProposal = ({ proposal, onAccept, onReject }) => {
   if (!proposal) return null;
 
@@ -661,43 +692,70 @@ const App = () => {
     let turnRoleClass = '';
     let turnContent = null;
 
-    // Handle special action/result types first, regardless of role
-    if (turn.type === 'action') {
-      turnRoleClass = 'action-turn';
-      turnContent = <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content}</ReactMarkdown>;
-    } else if (turn.type === 'action_result') {
-      turnRoleClass = `action-result-turn ${!turn.success && 'error'}`;
-      const codeContent = turn.content ? String(turn.content).replace(/^```\w*\n|```$/g, '') : '';
-      turnContent = <CodeCopyBlock language="bash" code={codeContent} />;
-    } else {
-      // Handle standard roles
-      switch (turn.role) {
-        case 'user':
-          turnRoleClass = 'user';
-          turnContent = (
-            <>
-              {turn.imageBase64 && (
-                <img 
-                  src={`data:image/png;base64,${turn.imageBase64}`} 
-                  alt="User upload" 
-                  className="turn-image" 
-                />
-              )}
-              {turn.content && <div className="turn-content">{turn.content}</div>}
-            </>
+    switch (turn.role) {
+      case 'user':
+        turnRoleClass = 'user';
+        turnContent = (
+          <>
+            {turn.imageBase64 && (
+              <img
+                src={`data:image/png;base64,${turn.imageBase64}`}
+                alt="User upload"
+                className="turn-image"
+              />
+            )}
+            {turn.content && <div className="turn-content">{turn.content}</div>}
+          </>
+        );
+        break;
+
+      case 'model':
+        turnRoleClass = 'assistant';
+        let modelContent;
+        try {
+          modelContent = JSON.parse(turn.content);
+        } catch (e) {
+          modelContent = turn.content; // It's just a string
+        }
+
+        if (typeof modelContent === 'object' && modelContent !== null && modelContent.action === 'runCommand') {
+          turnContent = <CommandExecution command={modelContent.parameters.command} args={modelContent.parameters.args || []} />;
+        } else {
+           turnContent = (
+            <ReactMarkdown
+              children={turn.content}
+              remarkPlugins={[remarkGfm]}
+              components={{ code: CodeBlock }}
+            />
           );
-          break;
-        case 'model':
-          turnRoleClass = 'assistant';
-          turnContent = renderModelTurn(turn);
-          break;
-        case 'system':
-          turnRoleClass = 'system';
-          turnContent = <div className="turn-content">{turn.content}</div>;
-          break;
-        default:
-          return null; // Or a fallback UI
-      }
+        }
+        break;
+
+      case 'tool':
+        turnRoleClass = 'assistant'; // Render in the same column
+        let toolContent;
+        try {
+          toolContent = JSON.parse(turn.content);
+        } catch (e) {
+          console.error("Could not parse tool content:", turn.content);
+          return null;
+        }
+
+        if (toolContent.functionResponse && toolContent.functionResponse.name === 'runCommand' && toolContent.functionResponse.response) {
+          const { stdout, stderr } = toolContent.functionResponse.response;
+          turnContent = <CommandResult stdout={stdout} stderr={stderr} />;
+        } else {
+          return null; // Don't render tool responses for other functions for now
+        }
+        break;
+
+      case 'system':
+        turnRoleClass = 'system';
+        turnContent = <div className="turn-content">{turn.content}</div>;
+        break;
+
+      default:
+        return null;
     }
 
     return (
