@@ -278,7 +278,9 @@ body {
   padding: 0.8rem 1.2rem;
   line-height: 1.6;
   white-space: pre-wrap;
-  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%; /* 부모(.turn)의 너비를 넘지 않도록 설정 */
+  box-sizing: border-box; /* 패딩이 너비에 포함되도록 설정 */
 }
 
 .turn-image {
@@ -492,7 +494,8 @@ body {
   font-family: 'Fira Code', 'Courier New', monospace;
   font-size: 0.9rem;
   line-height: 1.5;
-  white-space: pre;
+  white-space: pre-wrap; /* 긴 코드 라인이 자동으로 줄바꿈 되도록 변경 */
+  word-break: break-all; /* 단어 중간에서도 줄바꿈 허용 */
 }
 
 

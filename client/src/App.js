@@ -361,7 +361,7 @@ const App = () => {
       if (!response.ok) throw new Error('Failed to fetch session history');
       const data = await response.json();
       
-      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
+      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`}));
 
       setConversation(prev => shouldConcat ? [...formattedHistory, ...prev] : formattedHistory);
       setTotalConversations(data.total);
@@ -540,13 +540,21 @@ const App = () => {
                          return newConversation;
                       });
                       if (electronAPI) {
-                        const result = await electronAPI.runCommand(finalPayload.parameters);
+                        const { command, args } = finalPayload.parameters;
+                        const result = await electronAPI.runCommand({ command, args });
+                        
                         // After a tool runs, we need a new AbortController for the next stream
                         const nextController = new AbortController();
                         abortControllerRef.current = nextController;
+
                         await streamResponse(
                           `${API_URL}/gemini/tool-result`,
-                          { sessionId: currentSessionId, command: 'runCommand', args: finalPayload.parameters, result },
+                          {
+                            sessionId: currentSessionId,
+                            command: command,
+                            args: args,
+                            result: result,
+                          },
                           nextController.signal
                         );
                       } else {

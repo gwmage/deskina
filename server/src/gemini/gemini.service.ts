@@ -124,6 +124,34 @@ export class GeminiService {
         finalAction = { action: 'reply', parameters: { content: rawResponseText || 'Received an unusual response from the AI.' } };
       }
 
+      // --- AI 응답 정규화 시작 ---
+      
+      // 1단계: AI가 액션 계획(배열)을 보냈다면, 첫 번째 액션을 먼저 추출합니다.
+      if (Array.isArray(finalAction.actions) && finalAction.actions.length > 0) {
+        this.logger.log(`AI proposed a multi-action plan. Executing the first action.`);
+        finalAction = finalAction.actions[0];
+      }
+
+      // 2단계: 추출된 액션(또는 단일 액션)의 형식을 표준 포맷으로 통일합니다.
+      if (finalAction.function && !finalAction.action) {
+        // 'function' 키를 'action'으로 변환
+        this.logger.log(`Normalizing AI response: 'function' key found.`);
+        const { function: functionName, ...parameters } = finalAction;
+        finalAction = { action: functionName, parameters: parameters };
+      } else if (finalAction.reply && !finalAction.action) {
+        // 'reply' 키를 'action: "reply"'로 변환
+        this.logger.log(`Normalizing AI response: 'reply' key found.`);
+        finalAction = { action: 'reply', parameters: { content: finalAction.reply } };
+      }
+
+      // 최종 안전장치: 위 모든 과정을 거쳐도 'action' 키가 없다면, 전체를 텍스트로 간주합니다.
+      if (!finalAction.action) {
+        this.logger.warn('Could not determine a valid action. Defaulting to text reply.', JSON.stringify(finalAction));
+        finalAction = { action: 'reply', parameters: { content: JSON.stringify(finalAction) }};
+      }
+
+      // --- AI 응답 정규화 종료 ---
+
       const clientAction = await this.handleServerSideActions(userId, finalAction);
 
       const usage = (await result.response)?.usageMetadata;
