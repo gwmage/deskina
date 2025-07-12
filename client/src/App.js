@@ -340,6 +340,7 @@ const App = () => {
   const [hasMore, setHasMore] = useState(true);
   const [lastMessageId, setLastMessageId] = useState(null);
 
+  const conversationStateRef = useRef(conversation);
   const conversationRef = useRef(null);
   const abortControllerRef = useRef(null);
   const prevScrollHeightRef = useRef(null);
@@ -396,6 +397,10 @@ const App = () => {
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    conversationStateRef.current = conversation;
+  }, [conversation]);
 
   useEffect(() => {
     const lastMessage = conversation[conversation.length - 1];
@@ -483,35 +488,41 @@ const App = () => {
               }
             });
           } else if (data.type === 'final') {
+            const latestConversation = conversationStateRef.current;
+            const lastTurn = latestConversation[latestConversation.length - 1];
+            const streamingModelTurn = (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) ? lastTurn : null;
+
             setConversation(prev => {
               const newConversation = [...prev];
-              const lastTurn = newConversation[newConversation.length - 1];
-              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                if (lastTurn.content.trim() === '') {
+              const currentLastTurn = newConversation[newConversation.length - 1];
+              if (currentLastTurn && currentLastTurn.role === 'model' && currentLastTurn.isStreaming) {
+                 if (currentLastTurn.content.trim() === '') {
                   return newConversation.slice(0, -1);
                 }
-                lastTurn.isStreaming = false;
+                currentLastTurn.isStreaming = false;
               }
               return newConversation;
             });
 
             const finalPayload = data.payload;
-            if (finalPayload.action === 'runCommand') {
-              executeToolCall(finalPayload.toolCall);
-            } else if (finalPayload.action === 'readFile') {
-              executeToolCall(finalPayload.toolCall);
-            } else if (finalPayload.action === 'editFile') {
-              setEditProposal({
-                ...finalPayload.parameters,
-                originalContent: 'loading',
-              });
-            } else if (finalPayload.action === 'runScript') {
-              executeToolCall(finalPayload.toolCall);
-            } else {
-              const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
-              setConversation(prev => {
-                return [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }];
-              });
+
+            if (finalPayload.action && streamingModelTurn) {
+              const toolCall = {
+                name: finalPayload.action,
+                id: streamingModelTurn.id,
+                args: finalPayload.parameters
+              };
+
+              if (toolCall.name === 'runCommand' || toolCall.name === 'readFile' || toolCall.name === 'runScript') {
+                 executeToolCall(toolCall);
+              } else if (toolCall.name === 'editFile') {
+                setEditProposal({ ...finalPayload.parameters, originalContent: 'loading' });
+              } else {
+                 const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
+                 setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }]);
+              }
+            } else if (finalPayload.parameters?.content) {
+              setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
             }
           }
         } catch (e) {
@@ -551,21 +562,37 @@ const App = () => {
 
 
   const executeToolCall = useCallback(async (toolCall) => {
+    if (!toolCall || !toolCall.name) {
+      console.error('executeToolCall called with invalid toolCall:', toolCall);
+      return;
+    }
+
     if (toolCall.name === 'runCommand') {
-      const result = await window.electron.runCommand(toolCall.args);
-      console.log('Command output:', result.stdout || result.stderr);
-      sendToolResult(toolCall.id, JSON.stringify({
-          stdout: result.stdout,
-          stderr: result.stderr,
-      }));
+      const commandExecutionTurn = {
+        id: `tool-exec-${toolCall.id}`,
+        role: 'model',
+        content: JSON.stringify({ action: 'runCommand', parameters: toolCall.args })
+      };
+      setConversation(prev => [...prev, commandExecutionTurn]);
+      
+      const result = await window.electronAPI.runCommand(toolCall.args);
+      
+      const resultTurnContent = result.stderr && result.stderr.trim() ? `Error: ${result.stderr}` : `\`\`\`\n${result.stdout}\n\`\`\``;
+      const resultTurn = {
+        id: `tool-result-${toolCall.id}`,
+        role: 'tool',
+        content: resultTurnContent
+      };
+      setConversation(prev => [...prev, resultTurn]);
+
+      sendToolResult(toolCall.id, JSON.stringify(result));
+
     } else if (toolCall.name === 'editFile') {
-      const originalContent = await window.electron.readFile(toolCall.args.filePath);
-      setEditProposal({
-        ...toolCall.args,
-        originalContent,
-      });
+      const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
+      setEditProposal({ ...toolCall.args, originalContent });
     } else if (toolCall.name === 'createScript') {
-      const result = await window.electron.createScript(toolCall.args);
+      // Assuming createScript is also async and returns a result
+      const result = await window.electronAPI.createScript(toolCall.args);
       sendToolResult(toolCall.id, JSON.stringify(result));
     }
   }, [sendToolResult]);
@@ -721,32 +748,13 @@ const App = () => {
         if (typeof modelContent === 'object' && modelContent !== null && modelContent.action === 'runCommand') {
           turnContent = <CommandExecution command={modelContent.parameters.command} args={modelContent.parameters.args || []} />;
         } else {
-           turnContent = (
-            <ReactMarkdown
-              children={turn.content}
-              remarkPlugins={[remarkGfm]}
-              components={{ code: CodeBlock }}
-            />
-          );
+           turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         }
         break;
 
       case 'tool':
-        turnRoleClass = 'assistant'; // Render in the same column
-        let toolContent;
-        try {
-          toolContent = JSON.parse(turn.content);
-        } catch (e) {
-          console.error("Could not parse tool content:", turn.content);
-          return null;
-        }
-
-        if (toolContent.functionResponse && toolContent.functionResponse.name === 'runCommand' && toolContent.functionResponse.response) {
-          const { stdout, stderr } = toolContent.functionResponse.response;
-          turnContent = <CommandResult stdout={stdout} stderr={stderr} />;
-        } else {
-          return null; // Don't render tool responses for other functions for now
-        }
+        turnRoleClass = 'assistant';
+        turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         break;
 
       case 'system':
@@ -876,7 +884,7 @@ const App = () => {
             {imagePreview && (
               <div className="image-preview-container">
                 <img src={imagePreview} alt="Preview" className="image-preview" />
-                <button onClick={() => setImagePreview(null)} className="remove-image-button">×</button>
+                <button onClick={() => {setImagePreview(null); setImageBase64(null);}} className="remove-image-button">×</button>
               </div>
             )}
             <textarea
@@ -904,9 +912,10 @@ const App = () => {
                   setImageBase64(reader.result.split(',')[1]);
                 };
                 reader.readAsDataURL(file);
+                e.target.value = null; // Reset file input
               }
             }} style={{ display: 'none' }} />
-            <button onClick={handleSubmit} disabled={isLoading || !input.trim()}>
+            <button onClick={handleSubmit} disabled={isLoading || (!input.trim() && !imageBase64)}>
               {isLoading ? '■' : '▶'}
             </button>
           </div>
