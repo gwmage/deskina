@@ -6,9 +6,10 @@ console.log('[Preload] Preload script starting...');
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
   runCommand: (params) => ipcRenderer.invoke('run-command', params),
-  writeFile: (params) => ipcRenderer.invoke('writeFile', params),
   readFile: (filePath) => ipcRenderer.invoke('readFile', filePath),
+  writeFile: (data) => ipcRenderer.invoke('writeFile', data),
   checkFileExists: (filePath) => ipcRenderer.invoke('checkFileExists', filePath),
+  getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
 });
 
 console.log('[Preload] window.electronAPI exposed.'); 

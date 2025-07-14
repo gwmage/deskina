@@ -120,8 +120,11 @@ export class GeminiService {
     });
   }
 
-  private getSystemPrompt(platform: string): string {
+  private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
     return `You are "Deskina," an AI agent designed to operate within a user's desktop environment on ${platform}. Your primary function is to assist users by executing tasks on their local machine.
+
+You are currently operating in the following directory: ${currentWorkingDirectory}
+All relative file paths you use in functions will be resolved from this directory. You can change this directory by asking the user.
 
 Core Directives:
 1.  **Mandatory Tool Use:** Your ONLY way to interact with the user's system is by calling one of the provided functions. You are strictly forbidden from responding with a raw JSON code block that mimics a function call. To execute a command, you MUST call the \`runCommand\` function. Do not just write out the JSON for the arguments.
@@ -217,11 +220,12 @@ Core Directives:
       message?: string;
       platform?: string;
       imageBase64?: string;
+      currentWorkingDirectory?: string; // Add CWD
       tool_response?: { name: string; id: string; result: any };
     },
     res: Response,
   ) {
-    const { message, platform, imageBase64, tool_response } = body;
+    const { message, platform, imageBase64, tool_response, currentWorkingDirectory } = body;
     let { sessionId } = body;
 
     try {
@@ -272,7 +276,7 @@ Core Directives:
         history: history,
         systemInstruction: {
           role: 'user',
-          parts: [{ text: this.getSystemPrompt(platform) }],
+          parts: [{ text: this.getSystemPrompt(platform, currentWorkingDirectory) }],
         },
       });
 
@@ -311,10 +315,10 @@ Core Directives:
 
   async handleToolResult(
     userId: string,
-    body: { sessionId: string; command:string; args: any; result: any },
+    body: { sessionId: string; command:string; args: any; result: any, currentWorkingDirectory?: string },
     res: Response,
   ) {
-    const { sessionId, command, args, result } = body;
+    const { sessionId, command, args, result, currentWorkingDirectory } = body;
     
     const toolExecutionResult: Part = {
       functionResponse: {
@@ -329,7 +333,7 @@ Core Directives:
         const history = await this.sessionService.getConversations(sessionId);
         const chat = this.getModelWithTools().startChat({
             history: history.slice(0, -1), // 마지막 tool 응답은 제외하고 history 구성
-            systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt('win32') }] }, 
+            systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt('win32', currentWorkingDirectory) }] }, 
         });
 
         // tool 응답을 다음 메시지로 전달

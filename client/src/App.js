@@ -326,6 +326,9 @@ const App = () => {
   const [conversation, setConversation] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [currentWorkingDirectory, setCurrentWorkingDirectory] = useState('');
+  const [defaultCwd, setDefaultCwd] = useState(null); // Initialize with null
+  const [isEditingCwd, setIsEditingCwd] = useState(false);
   const sessionIdRef = useRef(null);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -341,9 +344,48 @@ const App = () => {
   const conversationRef = useRef(null);
   const abortControllerRef = useRef(null);
   const prevScrollHeightRef = useRef(null);
+  const cwdInputRef = useRef(null);
+  const inputRef = useRef(null); // Ref for the textarea
+  const focusAfterLoadingRef = useRef(false); // Ref to trigger focus after loading
+
+  const focusInput = () => {
+    // Use a timeout to ensure the focus command runs after the current render cycle.
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 0);
+  };
+
+  useEffect(() => {
+    const fetchHomeDir = async () => {
+      try {
+        const homeDir = await window.electronAPI.getHomeDir();
+        setDefaultCwd(homeDir);
+        setCurrentWorkingDirectory(homeDir); // Set initial CWD
+      } catch (error) {
+        console.error('Failed to get home directory:', error);
+        setDefaultCwd('~'); // Fallback
+        setCurrentWorkingDirectory('~');
+      }
+    };
+    fetchHomeDir();
+  }, []);
+
+  useEffect(() => {
+    // This effect handles focusing the input after a loading state has finished.
+    if (!isLoading && focusAfterLoadingRef.current) {
+      focusInput();
+      focusAfterLoadingRef.current = false; // Reset the ref
+    }
+  }, [isLoading]);
+
+  useEffect(() => {
+    if (isEditingCwd && cwdInputRef.current) {
+      cwdInputRef.current.focus();
+    }
+  }, [isEditingCwd]);
 
   const fetchSessionHistory = useCallback(async (sessionId, page = 1, concat = false) => {
-    if (!sessionId || sessionId === 'temp') {
+    if (!sessionId || sessionId === 'temp' || !defaultCwd) {
       return;
     }
     setIsLoading(true);
@@ -357,6 +399,9 @@ const App = () => {
       const data = await response.json();
       const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
 
+      const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
+      setCurrentWorkingDirectory(savedCwd || defaultCwd);
+
       setConversation(prev => concat ? [...formattedHistory, ...prev] : formattedHistory);
       setHasMore(data.conversations.length > 0 && (page * 20 < data.total));
     } catch (error) {
@@ -366,7 +411,151 @@ const App = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [token]);
+  }, [token, defaultCwd]);
+
+  // Define functions that depend on each other without useCallback to avoid initialization errors
+  // due to circular dependencies. They will close over the latest state on each render.
+  async function executeToolCall(toolCall) {
+    if (!toolCall || !toolCall.name) {
+      console.error('executeToolCall called with invalid toolCall:', toolCall);
+      return;
+    }
+    const commandExecutionTurn = {
+      id: `exec-${toolCall.id}`,
+      role: 'system',
+      type: 'action',
+      content: `> **${toolCall.name}**: \`${toolCall.args.command} ${toolCall.args.args.join(' ')}\``,
+    };
+    setConversation(prev => [...prev, commandExecutionTurn]);
+
+    if (toolCall.name === 'runCommand') {
+      const result = await window.electronAPI.runCommand({...toolCall.args, cwd: currentWorkingDirectory});
+      const resultTurn = {
+        id: `result-${toolCall.id}`,
+        role: 'system',
+        type: 'action_result',
+        content: result.stdout || result.stderr || result.error,
+        success: result.success,
+      };
+      setConversation(prev => [...prev, resultTurn]);
+      await sendToolResult(toolCall.name, toolCall.id, result);
+    } else if (toolCall.name === 'editFile') {
+      const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
+      setEditProposal({ ...toolCall.args, originalContent });
+    } else if (toolCall.name === 'createScript') {
+      const result = await window.electronAPI.createScript(toolCall.args);
+      await sendToolResult(toolCall.name, toolCall.id, result);
+    }
+  }
+
+  async function processStream(response, currentSessionId) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.lastIndexOf('\n');
+      if (boundary === -1) continue;
+
+      const jsonLines = buffer.substring(0, boundary).split('\n');
+      buffer = buffer.substring(boundary + 1);
+
+      for (const line of jsonLines) {
+        if (line.trim() === '') continue;
+        try {
+          const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
+          const data = JSON.parse(jsonString);
+
+          if (data.type === 'session_id' && currentSessionId === 'temp') {
+            setCurrentSessionId(data.payload);
+            setSessions(prev =>
+              prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
+            );
+          } else if (data.type === 'text_chunk') {
+            setConversation(prev => {
+              const newConversation = [...prev];
+              const lastTurnIndex = newConversation.length - 1;
+              const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
+
+              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                const updatedTurn = { ...lastTurn, content: lastTurn.content + data.payload };
+                newConversation[lastTurnIndex] = updatedTurn;
+                return newConversation;
+              } else {
+                return [...newConversation, { id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true }];
+              }
+            });
+          } else if (data.type === 'final') {
+            const finalPayload = data.payload;
+            setConversation(prev => {
+              const newConversation = [...prev];
+              const lastTurn = newConversation[newConversation.length - 1];
+              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
+                if (lastTurn.content.trim() === '') {
+                  return newConversation.slice(0, -1);
+                }
+                lastTurn.isStreaming = false;
+              }
+              return newConversation;
+            });
+
+            if (finalPayload.action) {
+              const lastMessage = conversationStateRef.current[conversationStateRef.current.length - 1];
+              const toolCall = {
+                name: finalPayload.action,
+                id: lastMessage ? lastMessage.id : `tool-call-${Date.now()}`,
+                args: finalPayload.parameters
+              };
+
+              if (['runCommand', 'readFile', 'runScript'].includes(toolCall.name)) {
+                await executeToolCall(toolCall);
+              } else if (toolCall.name === 'editFile') {
+                setEditProposal({ ...finalPayload.parameters, originalContent: 'loading', cwd: currentWorkingDirectory });
+              } else {
+                const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
+                setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }]);
+              }
+            } else if (finalPayload.parameters?.content) {
+              setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
+            }
+          }
+        } catch (e) {
+          console.error('Failed to parse JSON line:', line, e);
+        }
+      }
+    }
+  }
+
+  async function sendToolResult(toolCallName, toolCallId, output) {
+    if (!sessionIdRef.current || sessionIdRef.current === 'temp') {
+      console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/gemini/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          sessionId: sessionIdRef.current,
+          tool_response: { name: toolCallName, id: toolCallId, result: output }
+        }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to send tool result and get follow-up.');
+      }
+      await processStream(response, sessionIdRef.current);
+    } catch (error) {
+      console.error('Tool result submission or follow-up stream failed:', error);
+      setConversation(prev => [...prev, {
+        id: `error-${Date.now()}`, role: 'system', content: `Error processing tool result: ${error.message}`
+      }]);
+    }
+  }
 
   useEffect(() => {
     const storedToken = localStorage.getItem('accessToken');
@@ -439,208 +628,28 @@ const App = () => {
     }
   };
 
-  const processStream = useCallback(async (response, currentSessionId) => {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.lastIndexOf('\n');
-      if (boundary === -1) continue;
-
-      const jsonLines = buffer.substring(0, boundary).split('\n');
-      buffer = buffer.substring(boundary + 1);
-
-      for (const line of jsonLines) {
-        if (line.trim() === '') continue;
-        // console.log('[App.js processStream] Raw line from server:', line); // 서버에서 온 데이터 로깅
-        try {
-          const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
-          const data = JSON.parse(jsonString);
-
-          if (data.type === 'session_id' && currentSessionId === 'temp') {
-            setCurrentSessionId(data.payload);
-            setSessions(prev =>
-              prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
-            );
-          } else if (data.type === 'text_chunk') {
-            setConversation(prev => {
-              const newConversation = [...prev];
-              const lastTurnIndex = newConversation.length - 1;
-              const lastTurn = lastTurnIndex >= 0 ? newConversation[lastTurnIndex] : null;
-
-              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                const updatedTurn = {
-                  ...lastTurn,
-                  content: lastTurn.content + data.payload,
-                };
-                newConversation[lastTurnIndex] = updatedTurn;
-                return newConversation;
-              } else {
-                newConversation.push({ id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true });
-                return newConversation;
-              }
-            });
-          } else if (data.type === 'final') {
-            const finalPayload = data.payload;
-
-            // Stop any visual streaming indicators
-            setConversation(prev => {
-              const newConversation = [...prev];
-              const lastTurn = newConversation[newConversation.length - 1];
-              if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                 if (lastTurn.content.trim() === '') {
-                  // If the streaming turn was empty, remove it
-                  return newConversation.slice(0, -1);
-                }
-                // Mark the streaming as finished
-                lastTurn.isStreaming = false;
-              }
-              return newConversation;
-            });
-
-            // If the final payload contains an action, execute it.
-            if (finalPayload.action) {
-               // We need a toolCallId. We can generate one, but it's better
-               // if the server provides it. For now, we'll use the id of the last message.
-               const lastMessage = conversationStateRef.current[conversationStateRef.current.length - 1];
-               const toolCall = {
-                name: finalPayload.action,
-                id: lastMessage ? lastMessage.id : `tool-call-${Date.now()}`,
-                args: finalPayload.parameters
-              };
-
-              if (toolCall.name === 'runCommand' || toolCall.name === 'readFile' || toolCall.name === 'runScript') {
-                 executeToolCall(toolCall);
-              } else if (toolCall.name === 'editFile') {
-                setEditProposal({ ...finalPayload.parameters, originalContent: 'loading' });
-              } else {
-                 const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
-                 setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }]);
-              }
-            } else if (finalPayload.parameters?.content) {
-              // This case handles final text-only replies if any.
-              setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
-            }
-          }
-        } catch (e) {
-          console.error('Failed to parse JSON line:', line, e);
-        }
-      }
-    }
-  }, [token]);
-
-
-  const sendToolResult = useCallback(async (toolCallName, toolCallId, output) => {
-    // [진단] 이전 로그는 제거합니다.
-    console.log('[sendToolResult] Sending:', { toolCallName, toolCallId, sessionId: sessionIdRef.current });
-
-    if (!sessionIdRef.current || sessionIdRef.current === 'temp') {
-      console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
-      return;
-    }
-    
-    // AI의 후속 응답 스트림을 처리하기 위해 /gemini/generate를 호출합니다.
-    // tool-result 전용 엔드포인트 대신 기존 스트림 처리 로직을 재사용합니다.
-    try {
-      const response = await fetch(`${API_URL}/gemini/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          sessionId: sessionIdRef.current,
-          // message 필드 대신 tool_response를 보냅니다.
-          tool_response: {
-            name: toolCallName,
-            id: toolCallId,
-            result: output,
-          }
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to send tool result and get follow-up.');
-      }
-      
-      // AI의 후속 응답 (예: "명령어를 실행했습니다.")을 스트리밍으로 처리합니다.
-      await processStream(response, sessionIdRef.current);
-
-    } catch (error) {
-      console.error('Tool result submission or follow-up stream failed:', error);
-      // 사용자에게 에러를 표시하는 로직 추가 가능
-      setConversation(prev => [...prev, {
-        id: `error-${Date.now()}`,
-        role: 'system',
-        content: `Error processing tool result: ${error.message}`
-      }]);
-    }
-  }, [token, processStream]);
-
-
-  const executeToolCall = useCallback(async (toolCall) => {
-    if (!toolCall || !toolCall.name) {
-      console.error('executeToolCall called with invalid toolCall:', toolCall);
-      return;
-    }
-
-    // UI에 '명령어 실행 중' 상태를 먼저 표시합니다.
-    const commandExecutionTurn = {
-      id: `exec-${toolCall.id}`,
-      role: 'system',
-      type: 'action',
-      content: `> **${toolCall.name}**: \`${toolCall.args.command} ${toolCall.args.args.join(' ')}\``,
-    };
-    setConversation(prev => [...prev, commandExecutionTurn]);
-
-    if (toolCall.name === 'runCommand') {
-      const result = await window.electronAPI.runCommand(toolCall.args);
-      
-      const resultTurn = {
-        id: `result-${toolCall.id}`,
-        role: 'system',
-        type: 'action_result',
-        content: result.stdout || result.stderr || result.error,
-        success: result.success,
-      };
-      setConversation(prev => [...prev, resultTurn]);
-      
-      sendToolResult(toolCall.name, toolCall.id, result);
-
-    } else if (toolCall.name === 'editFile') {
-      // (이전 로직과 동일)
-      const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
-      setEditProposal({ ...toolCall.args, originalContent });
-    } else if (toolCall.name === 'createScript') {
-      // (이전 로직과 동일)
-      const result = await window.electronAPI.createScript(toolCall.args);
-      sendToolResult(toolCall.name, toolCall.id, result);
-    }
-  }, [sendToolResult]);
-
   const handleNewConversation = () => {
     setIsLoading(false);
     setConversation([]);
     setCurrentSessionId(null);
+    if (defaultCwd) setCurrentWorkingDirectory(defaultCwd);
     setInput('');
     setImagePreview(null);
     setImageBase64(null);
     setHasMore(true);
     setCurrentPage(1);
+    focusAfterLoadingRef.current = true; // Set ref to focus after potential loading
   };
 
   const handleSessionClick = (sessionId) => {
     if (sessionId === currentSessionId) return;
     setCurrentSessionId(sessionId);
-    setConversation([]); // Clear existing conversation
-    setHasMore(true); // Reset hasMore for the new session
-    setCurrentPage(1); // Reset to the first page
+    const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
+    if (defaultCwd) setCurrentWorkingDirectory(savedCwd || defaultCwd);
+    setConversation([]);
+    setHasMore(true);
+    setCurrentPage(1);
+    focusAfterLoadingRef.current = true; // Set ref to focus after history loads
   };
 
   const handleSubmit = (e) => {
@@ -653,10 +662,16 @@ const App = () => {
     } else {
       const userMessage = input.trim();
       if (!userMessage && !imageBase64) return;
+      
+      setIsLoading(true);
+      focusAfterLoadingRef.current = true; // Set ref to focus after this submission loading ends
 
       setInput('');
       setImagePreview(null);
       setImageBase64(null);
+
+      // Focus the input right after submitting, using a timeout to ensure it runs after the re-render.
+      // REMOVED focusInput() from here
 
       const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64: imageBase64 };
       setConversation(prev => [...prev, newTurn]);
@@ -664,8 +679,11 @@ const App = () => {
       let sessionIdToSend = currentSessionId;
       if (!sessionIdToSend) {
         sessionIdToSend = 'temp';
-        setSessions(prev => [{ id: 'temp', title: userMessage.substring(0, 30) }, ...prev]);
+        const newTempSession = { id: 'temp', title: userMessage.substring(0, 30) };
+        setSessions(prev => [newTempSession, ...prev]);
         setCurrentSessionId('temp');
+        setCurrentWorkingDirectory(defaultCwd);
+        localStorage.setItem(`cwd_temp`, defaultCwd);
       }
 
       const controller = new AbortController();
@@ -682,6 +700,7 @@ const App = () => {
           message: userMessage,
           platform: window.navigator.platform,
           imageBase64: imageBase64,
+          currentWorkingDirectory: currentWorkingDirectory, // Pass CWD to backend
         }),
         signal: controller.signal,
       })
@@ -696,6 +715,7 @@ const App = () => {
       })
       .finally(() => {
         setIsLoading(false);
+        // We already focus optimistically, but can add it here as a fallback if needed.
         if (abortControllerRef.current && abortControllerRef.current.signal === controller.signal) {
           abortControllerRef.current = null;
         }
@@ -878,6 +898,16 @@ const App = () => {
     return <AuthPage onLoginSuccess={handleLoginSuccess} />;
   }
 
+  if (!defaultCwd) {
+    return (
+      <div className="loading-screen">
+        <div className="loading-dots">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
       <Sidebar
@@ -890,11 +920,40 @@ const App = () => {
         onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
       />
       <main className="chat-container">
-        <button className="sidebar-toggle-button" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-        </button>
+        <header className="chat-header">
+          <button className="sidebar-toggle-button" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+          </button>
+          <div className="cwd-container">
+            <span className="cwd-icon">📁</span>
+            {isEditingCwd ? (
+              <input
+                ref={cwdInputRef}
+                type="text"
+                value={currentWorkingDirectory}
+                onChange={(e) => setCurrentWorkingDirectory(e.target.value)}
+                onBlur={() => {
+                  setIsEditingCwd(false);
+                  if (currentSessionId) {
+                    localStorage.setItem(`cwd_${currentSessionId}`, currentWorkingDirectory);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.target.blur();
+                  }
+                }}
+                className="cwd-input"
+              />
+            ) : (
+              <span onClick={() => setIsEditingCwd(true)} className="cwd-text" title={currentWorkingDirectory}>
+                {currentWorkingDirectory}
+              </span>
+            )}
+          </div>
+        </header>
         <div className="conversation" ref={conversationRef}>
           {conversation.length === 0 && !isLoading && renderWelcomeScreen()}
           
@@ -927,6 +986,7 @@ const App = () => {
               </div>
             )}
             <textarea
+              ref={inputRef} // Attach ref to textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

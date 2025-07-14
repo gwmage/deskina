@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const { exec } = require('child_process');
 const { TextDecoder } = require('util');
 const iconv = require('iconv-lite');
+const os = require('os');
 
 function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
@@ -71,11 +72,8 @@ app.on('activate', () => {
 // code. You can also put them in separate files and require them here.
 
 // Handle the 'run-command' event from the renderer process
-ipcMain.handle('run-command', async (event, params) => {
-  const command = params.command;
-  const args = params.args || [];
-  
-  const processedArgs = args.map(arg => {
+ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
+  const processedArgs = (args || []).map(arg => {
     // If arg contains spaces and is not already quoted, quote it.
     if (arg.includes(' ') && !/^".*"$/.test(arg) && !/^'.*'$/.test(arg)) {
       return `"${arg}"`;
@@ -84,10 +82,15 @@ ipcMain.handle('run-command', async (event, params) => {
   });
 
   const fullCommand = `${command} ${processedArgs.join(' ')}`;
-  console.log(`[Main] Executing command: ${fullCommand}`);
+  console.log(`[Main] Executing command in ${cwd || os.homedir()}: ${fullCommand}`);
 
   return new Promise((resolve) => {
-    exec(fullCommand, { shell: true, encoding: 'buffer' }, (error, stdout, stderr) => {
+    const options = { 
+      shell: true, 
+      encoding: 'buffer',
+      cwd: cwd || os.homedir(),
+    };
+    exec(fullCommand, options, (error, stdout, stderr) => {
       const shellEncoding = getShellEncoding();
       let decodedStdout;
       let decodedStderr;
@@ -147,6 +150,10 @@ ipcMain.handle('checkFileExists', async (event, filePath) => {
   } catch {
     return { exists: false };
   }
+});
+
+ipcMain.handle('get-home-dir', async () => {
+  return os.homedir();
 });
 
 function getShellEncoding() {

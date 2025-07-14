@@ -81,8 +81,8 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  position: relative; /* Needed for absolute child positioning */
-  transition: margin-left 0.3s ease;
+  background-color: var(--background-color);
+  position: relative;
 }
 
 .app-container.sidebar-open .chat-container {
@@ -91,20 +91,15 @@ body {
 
 
 .sidebar-toggle-button {
-  position: absolute;
-  top: 1rem;
-  left: 1rem;
-  z-index: 1000;
-  background: transparent;
+  background: none;
   border: none;
-  color: var(--text-secondary-color);
+  color: var(--text-color);
+  font-size: 24px;
   cursor: pointer;
-  padding: 8px;
-  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  padding: 4px;
 }
 
 .sidebar-toggle-button:hover {
@@ -188,6 +183,56 @@ body {
 
 
 /* --- Chat Area --- */
+.chat-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--background-light);
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.cwd-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--background-color);
+  padding: 6px 12px;
+  border-radius: 6px;
+  flex-grow: 1;
+  min-width: 0; /* Prevents flex item from overflowing */
+}
+
+.cwd-icon {
+  font-size: 16px;
+}
+
+.cwd-text,
+.cwd-input {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 14px;
+  color: var(--text-color);
+  background: transparent;
+  border: none;
+  outline: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-grow: 1;
+  width: 100%;
+}
+
+.cwd-text {
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.cwd-input {
+  border-bottom: 1px solid var(--accent-color);
+}
+
+
 .conversation {
   flex-grow: 1;
   overflow-y: auto;
