@@ -73,6 +73,8 @@ app.on('activate', () => {
 
 // Handle the 'run-command' event from the renderer process
 ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
+  console.log(`[Main] 'run-command' received:`, { command, args, cwd });
+
   const processedArgs = (args || []).map(arg => {
     // If arg contains spaces and is not already quoted, quote it.
     if (arg.includes(' ') && !/^".*"$/.test(arg) && !/^'.*'$/.test(arg)) {
@@ -82,13 +84,23 @@ ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
   });
 
   const fullCommand = `${command} ${processedArgs.join(' ')}`;
-  console.log(`[Main] Executing command in ${cwd || os.homedir()}: ${fullCommand}`);
+  
+  let executionCwd = cwd || os.homedir();
+  console.log(`[Main] Initial executionCwd:`, executionCwd);
+
+  // On Windows, if cwd is a drive letter like "C:", normalize it to "C:\"
+  if (process.platform === 'win32' && /^[a-zA-Z]:$/.test(executionCwd)) {
+    console.log(`[Main] Normalizing drive letter path.`);
+    executionCwd += '\\';
+  }
+  
+  console.log(`[Main] Executing command in final executionCwd: ${executionCwd}: ${fullCommand}`);
 
   return new Promise((resolve) => {
     const options = { 
       shell: true, 
       encoding: 'buffer',
-      cwd: cwd || os.homedir(),
+      cwd: executionCwd,
     };
     exec(fullCommand, options, (error, stdout, stderr) => {
       const shellEncoding = getShellEncoding();
@@ -106,6 +118,7 @@ ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
 
       if (error) {
         console.error(`[Main] exec error for command '${command}': ${error.message}`);
+        console.error(`[Main] Full error object:`, error);
         resolve({
           success: false,
           stdout: decodedStdout,
