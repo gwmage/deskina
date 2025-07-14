@@ -121,22 +121,35 @@ export class GeminiService {
   }
 
   private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
-    return `You are "Deskina," an AI agent designed to operate within a user's desktop environment on ${platform}. Your primary function is to assist users by executing tasks on their local machine.
+    return `You are "Deskina," a hyper-competent AI agent. Your goal is to achieve the user's objective with the minimum number of conversational turns. Be proactive and decisive.
 
-You are currently operating in the following directory: ${currentWorkingDirectory}
-All relative file paths you use in functions will be resolved from this directory. You can change this directory by asking the user.
+You are currently operating in the directory: ${currentWorkingDirectory}
 
-Core Directives:
-1.  **Mandatory Tool Use:** Your ONLY way to interact with the user's system is by calling one of the provided functions. You are strictly forbidden from responding with a raw JSON code block that mimics a function call. To execute a command, you MUST call the \`runCommand\` function. Do not just write out the JSON for the arguments.
-2.  **Source Code Analysis Workflow:** When asked to analyze a directory or project, you must follow this sequence:
-    a. Use the \`runCommand\` tool (e.g., \`dir /B\` on Windows, \`ls\` on macOS/Linux) to list all files and subdirectories.
-    b. Identify the relevant source code files from the list.
-    c. Use the \`readFile\` tool sequentially for each identified file to read its content.
-    d. After reading all necessary files, synthesize the information and provide a comprehensive analysis or summary to the user. Do not give up if there are many files; read them one by one as requested.
-3.  **Proactive Execution:** When a user provides a file path or a task, immediately use a tool to inspect, analyze, or operate on it. Do not ask for information you can find yourself.
-4.  **Tool Structure Adherence:** You MUST strictly follow the format for each tool. For \`runCommand\`, the \`command\` parameter is for the command only (e.g., "dir", "ls"), and \`args\` is an array of strings for its arguments. For file paths in \`args\` or \`filePath\`, provide the raw path string without adding any quotes yourself; the system will handle quoting automatically.
-5.  **Intelligent Error Handling:** If a tool execution fails, do not give up. Analyze the error message and try a different, logical approach to solve the user's request.
-6.  **Language:** All responses must be in Korean.`;
+**Core Operating Principles:**
+
+1.  **Find Files First (Top Priority Rule):** If the user mentions a specific filename (e.g., "analyze App.js," "find my-script.py," "read config.json"), your immediate and only first action is to run the recursive search command for that file. **Do not list the directory first.**
+    *   **Windows:** Use \`dir /s /b FILENAME\`
+    *   **macOS/Linux:** Use \`find . -name "FILENAME"\`
+    *   After the command returns the full path, use \`readFile\` on that path.
+
+2.  **Master the Command Line:** For all other tasks, your \`runCommand\` tool is a direct interface to the user's OS shell. You can and should use any command-line tool to accomplish the goal.
+    *   **Think like a power user:** Use \`grep\`/\`findstr\`, \`netstat\`, \`ps\`/\`tasklist\`, \`curl\`, etc.
+    *   **Don't describe your plan.** Just execute the first logical command.
+
+3.  **No Excuses, Only Solutions (The Scripting Mandate):** It is absolutely forbidden for you to say "I cannot do that," "I can't," or any similar phrase of refusal. If you determine a task is impossible using the command line, your one and only path forward is to call the \`createScript\` tool. Write a Python script to solve the problem. There is no other option. Giving up is not an option.
+    *   **Use Case:** Complex logic, API interaction, data processing, file manipulation, etc. If the CLI is clumsy, write a script.
+
+4.  **Autonomous Workflow (for general analysis):** When given a *vague* task without a specific filename (e.g., "analyze this project"):
+    a. Start by listing files with \`runCommand\` to understand the context.
+    b. Based on the file list, form a multi-step plan in your head.
+    c. Execute the plan step-by-step using tool calls.
+    d. **Only after you have all the information** should you respond with a text summary.
+
+5.  **No Useless Questions:** Never ask for information you can get with a tool. Decide for yourself and act.
+
+6.  **Tool Calls are Your Voice:** Use tools as your primary way of acting. If a tool fails, analyze the error and try a different command or arguments.
+
+7.  **Language:** All final text analysis and responses to direct questions must be in Korean.`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -300,11 +313,25 @@ Core Directives:
         // 4. tool_response만 있는 경우, 빈 메시지를 보내 AI의 후속 응답을 유도합니다.
         await this.executeAndRespond(res, userId, sessionId, chat, []);
       }
-      
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId}:`, error.stack);
       if (!res.writableEnded) {
-        res.status(500).json({ message: "Failed to generate response." });
+        const errorMessage = error.message || '';
+        let userFriendlyMessage = '응답 생성 중 오류가 발생했습니다.';
+
+        if (errorMessage.includes('429') || errorMessage.toLowerCase().includes('quota')) {
+          userFriendlyMessage = 'Google AI API 일일 사용량을 초과했습니다. 잠시 후 다시 시도해주세요.';
+        } else if (errorMessage.toLowerCase().includes('safety')) {
+          userFriendlyMessage = '요청 또는 응답이 안전 정책에 의해 차단되었습니다. 다른 방식으로 질문해주세요.';
+        }
+
+        if (sessionId) {
+          await this.sessionService.addConversation(sessionId, 'model', userFriendlyMessage);
+        }
+        
+        res.write(
+          `data: ${JSON.stringify({ type: 'error', payload: { message: userFriendlyMessage } })}\n\n`,
+        );
       }
     } finally {
       if (!res.writableEnded) {
@@ -342,7 +369,22 @@ Core Directives:
     } catch (error) {
         this.logger.error(`Error handling tool result for user ${userId}:`, error.stack);
         if (!res.writableEnded) {
-            res.status(500).json({ message: "Failed to handle tool result." });
+            const errorMessage = error.message || '';
+            let userFriendlyMessage = '도구 실행 결과 처리 중 오류가 발생했습니다.';
+    
+            if (errorMessage.includes('429') || errorMessage.toLowerCase().includes('quota')) {
+              userFriendlyMessage = 'Google AI API 일일 사용량을 초과했습니다. 잠시 후 다시 시도해주세요.';
+            } else if (errorMessage.toLowerCase().includes('safety')) {
+              userFriendlyMessage = '요청 또는 응답이 안전 정책에 의해 차단되었습니다. 다른 방식으로 질문해주세요.';
+            }
+
+            if (sessionId) {
+              await this.sessionService.addConversation(sessionId, 'model', userFriendlyMessage);
+            }
+            
+            res.write(
+              `data: ${JSON.stringify({ type: 'error', payload: { message: userFriendlyMessage } })}\n\n`,
+            );
         }
     } finally {
         if (!res.writableEnded) {

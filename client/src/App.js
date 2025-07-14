@@ -489,6 +489,11 @@ const App = () => {
                 return [...newConversation, { id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true }];
               }
             });
+          } else if (data.type === 'error') {
+            setConversation(prev => [...prev, {
+              id: `error-${Date.now()}`, role: 'system', content: `Error processing tool result: ${data.payload.message}`, isComplete: true, isError: true
+            }]);
+            setIsLoading(false);
           } else if (data.type === 'final') {
             const finalPayload = data.payload;
             setConversation(prev => {
