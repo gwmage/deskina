@@ -31,7 +31,7 @@ export class SessionService {
 
   async addConversation(
     sessionId: string,
-    role: 'user' | 'model' | 'tool',
+    role: 'user' | 'model' | 'tool' | 'function',
     content: string,
     imageBase64?: string | null,
   ) {
@@ -134,55 +134,59 @@ export class SessionService {
   }
 
   async getConversations(sessionId: string, limit = 50) {
-    const history = await this.prisma.conversation.findMany({
+    const dbHistory = await this.prisma.conversation.findMany({
       where: { sessionId },
       orderBy: { createdAt: 'asc' },
       take: limit,
     });
 
-    return history
-      .map((conv) => {
-        const parts: Part[] = [];
+    const apiHistory: { role: 'user' | 'model' | 'function'; parts: Part[] }[] = [];
 
-        if (conv.role === 'model') {
+    for (let i = 0; i < dbHistory.length; i++) {
+      const turn = dbHistory[i];
+      const parts: Part[] = [];
+
+      if (turn.role === 'user') {
+        if (turn.content) {
+          parts.push({ text: turn.content });
+        }
+        if (turn.imageBase64) {
+          parts.push({ inlineData: { mimeType: 'image/png', data: turn.imageBase64 } });
+        }
+        apiHistory.push({ role: 'user', parts });
+
+      } else if (turn.role === 'model') {
+        try {
+          const parsed = JSON.parse(turn.content);
+          if (parsed.action && parsed.parameters) {
+            parts.push({ functionCall: { name: parsed.action, args: parsed.parameters } });
+          } else {
+            parts.push({ text: turn.content });
+          }
+        } catch (e) {
+          parts.push({ text: turn.content });
+        }
+        apiHistory.push({ role: 'model', parts });
+
+      } else if (turn.role === 'function' || turn.role === 'tool') { // Legacy 'tool' support
+        // A function/tool response always follows a model's function call.
+        const modelTurn = apiHistory[apiHistory.length - 1];
+        if (modelTurn && modelTurn.role === 'model' && modelTurn.parts[0]?.functionCall) {
           try {
-            // 모델의 응답은 도구 호출(functionCall)이거나 일반 텍스트입니다.
-            const parsed = JSON.parse(conv.content);
-            if (parsed.action && parsed.parameters) {
-              parts.push({
-                functionCall: { name: parsed.action, args: parsed.parameters },
-              });
-            } else {
-              parts.push({ text: conv.content });
-            }
-          } catch (e) {
-            parts.push({ text: conv.content });
-          }
-        } else if (conv.role === 'user') {
-          // 사용자의 입력은 텍스트와 이미지(선택)를 포함합니다.
-          if (conv.content) {
-            parts.push({ text: conv.content });
-          }
-          if (conv.imageBase64) {
+            const toolResult = JSON.parse(turn.content);
             parts.push({
-              inlineData: { mimeType: 'image/png', data: conv.imageBase64 },
+              functionResponse: {
+                name: modelTurn.parts[0].functionCall.name,
+                response: { output: toolResult.content },
+              },
             });
-          }
-        } else if (conv.role === 'tool') {
-          // 도구의 응답은 functionResponse 파트입니다.
-          try {
-            const toolPart = JSON.parse(conv.content);
-            parts.push(toolPart);
-          } catch (e) {
-            console.error('Failed to parse tool content from DB', e);
+            apiHistory.push({ role: 'function', parts });
+          } catch(e) {
+             this.logger.error(`Failed to parse tool content from DB for turn ${turn.id}`, e);
           }
         }
-
-        return {
-          role: conv.role === 'tool' ? 'function' : (conv.role as 'user' | 'model'),
-          parts: parts,
-        };
-      })
-      .filter((h) => h.parts.length > 0);
+      }
+    }
+    return apiHistory;
   }
 }

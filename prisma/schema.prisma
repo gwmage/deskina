@@ -1,0 +1,63 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum ConversationRole {
+  user
+  model
+  tool
+  function
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  role      ConversationRole
+  content   String
+  imageBase64 String?
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String?
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  title     String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  conversations Conversation[]
+}
+
+model Script {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  name        String
+  description String?
+  code        String
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, name])
+}
+
+model User {
+  id          String    @id @default(cuid())
+  email       String    @unique
+  password    String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  sessions    Session[]
+  scripts     Script[]
+  isVerified  Boolean   @default(false)
+  verificationCode String?
+  verificationCodeExpiresAt DateTime?
+} 

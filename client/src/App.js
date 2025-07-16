@@ -557,6 +557,7 @@ const App = () => {
               prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
             );
           } else if (data.type === 'text_chunk') {
+            // setIsLoading(false); // Stop loading when first text arrives
             setConversation(prev => {
               const newConversation = [...prev];
               const lastTurnIndex = newConversation.length - 1;
@@ -612,7 +613,11 @@ const App = () => {
               // before we start executing the tool call which might also update the state.
               setTimeout(() => executeToolCall(toolCall), 50);
 
-            } else if (finalPayload.parameters?.content) {
+            } else {
+              // If there's no action, the process is complete.
+              setIsLoading(false);
+            }
+             if (finalPayload.parameters?.content) {
               setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
             }
           }
@@ -628,6 +633,7 @@ const App = () => {
       console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
       return;
     }
+    setIsLoading(true); // Start loading when sending a tool result
     try {
       const response = await fetch(`${API_URL}/gemini/generate`, {
         method: 'POST',
@@ -831,10 +837,10 @@ const App = () => {
       })
       .catch(error => {
         console.error('Error:', error);
+        setIsLoading(false); // Stop loading on error
       })
       .finally(() => {
-        setIsLoading(false);
-        // We already focus optimistically, but can add it here as a fallback if needed.
+        // REMOVED setIsLoading(false) from here. It will be handled by the stream processor.
         if (abortControllerRef.current && abortControllerRef.current.signal === controller.signal) {
           abortControllerRef.current = null;
         }

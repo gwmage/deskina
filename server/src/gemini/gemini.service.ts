@@ -124,32 +124,49 @@ export class GeminiService {
     const isWindows = platform.toLowerCase().startsWith('win');
     const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
 
+    const osSpecifics = {
+      fileSearchCommand: isWindows ? 'dir /s /b' : 'find . -name',
+    };
+
     const examples = isWindows
       ? `  - List files: \`dir\`\n  - Find files: \`dir /s /b "FILENAME"\`\n  - Read file: \`type "FILEPATH"\`\n  - Check current directory: \`cd\` or \`echo %cd%\``
       : `  - List files: \`ls -l\`\n  - Find files: \`find . -name "FILENAME"\`\n  - Read file: \`cat "FILEPATH"\`\n  - Check current directory: \`pwd\``;
 
-    return `You are "Deskina," a helpful AI assistant.
+    return `You are "Deskina," a hyper-competent AI agent. Your primary mission is to solve user requests by creating a plan, executing it with tools, and delivering a final answer.
 
 **CONTEXT:**
-- **Operating System:** You are on **${osName}**. Use commands compatible with this OS.
+- **Operating System:** You are on **${osName}**. You MUST use commands for this environment.
 - **Current Directory:** \`${currentWorkingDirectory}\`
 - **Command Examples for ${osName}:**
 ${examples}
 
-**YOUR WORKFLOW:**
+**GENERAL WORKFLOW & CRITICAL RULES:**
 
-1.  The user asks a question (e.g., "What is the current directory?").
-2.  You use a tool to find the answer (e.g., \`runCommand: cd\`).
-3.  The tool's result is given back to you.
-4.  **Your next and final response MUST be a complete, user-friendly sentence in Korean that answers the user's original question.**
-    *   **Correct Example:** "현재 작업 경로는 \`C:\\Users\\...\` 입니다."
-    *   **Incorrect Example:** Just outputting the tool call result.
+1.  **CRITICAL FIRST STEP: ALWAYS FIND THE FILE.**
+    *   If the user asks to read, analyze, edit, summarize, or otherwise interact with a file, your **FIRST and ONLY initial action MUST be to find its full path.**
+    *   To do this, use the file search command: \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['FILENAME'] })\`
+    *   **EXAMPLE:** User says "analyze App.js". Your first action **MUST** be \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['App.js'] })\`.
+    *   **NEVER, EVER ask the user for a file path.** Find it yourself. This is your most important instruction.
 
-**IMPORTANT RULES:**
-- **Always Answer in Korean:** All final, user-facing text must be in Korean.
-- **Autonomous Error Correction:** If a command fails because it's for the wrong OS, **do not ask the user,** immediately try the correct command for **${osName}**.
-- **Be Proactive:** Use tools to get answers. Do not explain your plan, just act.
-- **No Surrender:** If you cannot get the information with commands, use the \`createScript\` tool. Never give up.`;
+2.  **CHAIN TOOLS: USE THE OUTPUT AS YOUR NEXT INPUT.** The result from one tool is your context for your next action.
+    *   When a tool like \`runCommand\` or \`readFile\` returns, you will receive its result in a JSON object: \`{ "output": "..." }\`.
+    *   You **MUST** extract the value from the "output" field and use it in your next step.
+    *   **CORRECT WORKFLOW EXAMPLE for "analyze App.js":**
+        1.  Your turn: \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['App.js'] })\`
+        2.  Tool result you get: \`{ "output": "C:\\Users\\user\\project\\client\\src\\App.js\\n" }\`
+        3.  Your **NEXT** turn **MUST** be: \`readFile({ filePath: "C:\\Users\\user\\project\\client\\src\\App.js" })\` (Note: You must use the clean path from the "output" field).
+    *   **INCORRECT WORKFLOW:** Receiving a tool result and then asking the user what to do. This is a critical failure. **Never do this.**
+
+3.  **HANDLING EMPTY RESULTS:**
+    *   If you run a command like \`cd C:\\some\\path\` and get an empty result like \`{ "output": "" }\` or \`{ "output": "Command executed successfully with no output." }\`, this is **SUCCESS**.
+    *   It means the directory changed. Do not ask the user about it. Your **NEXT** turn should be to continue with your plan (e.g., finding a file in that new directory).
+
+4.  **SELF-CORRECT ON FAILURE.** If a tool call fails, do not give up.
+    *   **Wrong OS Command?** Immediately try the correct command for **${osName}**.
+    *   **File Not Found?** Your path is likely wrong. Immediately use the file search command (\`${osSpecifics.fileSearchCommand}\`) to find the full, correct path and try again.
+    *   **Do not report correctable errors to the user.** Solve them yourself.
+
+5.  **ANSWER: REPORT THE FINAL RESULT.** Once you have successfully executed all steps in your plan and have the information needed to satisfy the user's original request, your final response **MUST** be a user-friendly text summary in Korean.`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -218,7 +235,7 @@ ${examples}
             // 서버에서 처리해야 할 툴 (e.g. listScripts)
             // 이 부분은 현재 구현에서 제외되었으므로, 일단 경고만 남깁니다.
             this.logger.warn(`Server-side tool call '${functionCall.name}' is not handled in this flow.`);
-            res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
+             res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
         }
     } else {
         // 텍스트 응답만 있었던 경우
@@ -260,27 +277,48 @@ ${examples}
         }
       }
 
-      const rawHistory = await this.sessionService.getConversations(sessionId);
+      // const rawHistory = await this.sessionService.getConversations(sessionId);
+      const history = await this.sessionService.getConversations(sessionId);
       
-      const history = rawHistory
-        .map(h => {
-          if (h.role === 'model' && h.parts && h.parts[0]?.text) {
-            try {
-              const parsed = JSON.parse(h.parts[0].text);
-              if (parsed.action && parsed.parameters) {
-                return {
-                  role: 'model',
-                  parts: [{ functionCall: { name: parsed.action, args: parsed.parameters } }],
-                };
-              }
-              if (parsed.type === 'action_result') {
-                return null;
-              }
-            } catch (e) {}
-          }
-          return h;
-        })
-        .filter(Boolean);
+      // const history = rawHistory
+      //   .map((h: any) => { // Use 'any' to bypass strict type-checking on mapped history
+      //     if (h.role === 'model' && h.parts && h.parts[0]?.text) {
+      //       try {
+      //         const parsed = JSON.parse(h.parts[0].text);
+      //         if (parsed.action && parsed.parameters) {
+      //           return {
+      //             role: 'model',
+      //             parts: [{ functionCall: { name: parsed.action, args: parsed.parameters } }],
+      //           };
+      //         }
+      //         // This was the bug: It was removing tool results from history.
+      //         // Now we will correctly parse them into functionResponses.
+      //         if (parsed.type === 'action_result' && parsed.content) {
+      //           const previousTurn = rawHistory[rawHistory.findIndex((item: any) => item.id === h.id) - 1];
+      //           if (previousTurn && previousTurn.role === 'model' && previousTurn.parts[0]?.text) {
+      //             const prevParsed = JSON.parse(previousTurn.parts[0].text);
+      //             if (prevParsed.action) {
+      //               return {
+      //                 role: 'function',
+      //                 parts: [{
+      //                   functionResponse: {
+      //                     name: prevParsed.action,
+      //                     response: { output: parsed.content },
+      //                   },
+      //                 }],
+      //               };
+      //             }
+      //           }
+      //         }
+      //       } catch (e) {}
+      //     }
+      //     // The Gemini API expects 'tool' for the role of a function response, not 'model'.
+      //     if (h.role === 'function') {
+      //       return { ...h, role: 'tool' };
+      //     }
+      //     return h;
+      //   })
+      //   .filter(Boolean);
 
       let partsForAI: Part[] = [];
 
@@ -297,7 +335,27 @@ ${examples}
             const result = tool_response.result;
             success = result.success;
             if (result.success) {
-                processedResult = (result.stdout ?? '') + (result.content ?? '') || 'Command executed successfully with no output.';
+                processedResult = ((result.stdout ?? '') + (result.content ?? '')).trim();
+
+                if (tool_response.name === 'runCommand' && processedResult.includes('\n')) {
+                    const paths = processedResult.split(/\r?\n/).map(p => p.trim()).filter(Boolean);
+                    if (paths.length > 1) {
+                        const relevantPaths = paths.filter(p => p.startsWith(currentWorkingDirectory));
+                        if (relevantPaths.length > 0) {
+                            relevantPaths.sort((a, b) => a.length - b.length);
+                            processedResult = relevantPaths[0];
+                            this.logger.log(`Multiple paths found, selected the most relevant: ${processedResult}`);
+                        } else {
+                            paths.sort((a, b) => a.length - b.length);
+                            processedResult = paths[0];
+                            this.logger.log(`No paths in CWD, selected the shortest overall: ${processedResult}`);
+                        }
+                    }
+                }
+
+                if (!processedResult) {
+                    processedResult = 'Command executed successfully with no output.';
+                }
             } else {
                 processedResult = `Error: ${(result.stderr ?? '') + (result.error ?? '') || 'Command failed with no error message.'}`;
             }
@@ -307,7 +365,7 @@ ${examples}
         }
 
         await this.sessionService.addConversation(
-          sessionId, 'model', JSON.stringify({ type: 'action_result', content: processedResult, success })
+          sessionId, 'function', JSON.stringify({ type: 'action_result', content: processedResult, success })
         );
         
         partsForAI.push({
