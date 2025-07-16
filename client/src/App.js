@@ -763,7 +763,7 @@ const App = () => {
     setImageBase64(null);
     setHasMore(false);
     setCurrentPage(1);
-    focusAfterLoadingRef.current = true; // Set ref to focus after potential loading
+    focusInput(); // 직접 포커스 함수를 호출합니다.
     isNewSessionRef.current = true; // Flag that we are starting a new session
   };
 
