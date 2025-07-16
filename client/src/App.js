@@ -551,11 +551,14 @@ const App = () => {
           const jsonString = line.startsWith('data: ') ? line.substring(5) : line;
           const data = JSON.parse(jsonString);
 
-          if (data.type === 'session_id' && currentSessionId === 'temp') {
-            setCurrentSessionId(data.payload);
+          if (data.type === 'session_id' && (currentSessionId === 'temp' || !currentSessionId)) {
+            const newId = data.payload;
+            setCurrentSessionId(newId);
             setSessions(prev =>
-              prev.map(s => s.id === 'temp' ? { ...s, id: data.payload } : s)
+              prev.map(s => (s.id === 'temp' ? { ...s, id: newId } : s))
             );
+            // This is the fix: save the CWD for the new session ID immediately.
+            localStorage.setItem(`cwd_${newId}`, currentWorkingDirectory);
           } else if (data.type === 'text_chunk') {
             // setIsLoading(false); // Stop loading when first text arrives
             setConversation(prev => {
@@ -758,7 +761,7 @@ const App = () => {
     setInput('');
     setImagePreview(null);
     setImageBase64(null);
-    setHasMore(true);
+    setHasMore(false);
     setCurrentPage(1);
     focusAfterLoadingRef.current = true; // Set ref to focus after potential loading
     isNewSessionRef.current = true; // Flag that we are starting a new session
@@ -807,8 +810,8 @@ const App = () => {
         const newTempSession = { id: 'temp', title: userMessage.substring(0, 30) };
         setSessions(prev => [newTempSession, ...prev]);
         setCurrentSessionId('temp');
-        setCurrentWorkingDirectory(defaultCwd);
-        localStorage.setItem(`cwd_temp`, defaultCwd);
+        // BUGFIX: Do not reset CWD. Instead, save the current CWD for the temp session.
+        localStorage.setItem(`cwd_temp`, currentWorkingDirectory);
       }
 
       const controller = new AbortController();

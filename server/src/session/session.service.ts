@@ -68,7 +68,7 @@ export class SessionService {
       const turn = history[i];
 
       if (
-        turn.role === 'tool' &&
+        (turn.role === 'tool' || turn.role === 'function') &&
         i + 1 < history.length &&
         history[i + 1].role === 'model'
       ) {
@@ -80,7 +80,8 @@ export class SessionService {
 
           if (modelAction.action === 'runCommand' || modelAction.action === 'runScript' || modelAction.action === 'readFile') {
             const toolContentObject = JSON.parse(toolTurn.content);
-            const commandResult = toolContentObject.functionResponse?.response;
+            // Check for both legacy and new structures
+            const commandResult = toolContentObject.functionResponse?.response || toolContentObject;
 
             if (commandResult) {
               const commandStr =
@@ -98,7 +99,7 @@ export class SessionService {
                 role: 'system',
                 type: 'action_result',
                 content: commandResult.success
-                  ? commandResult.stdout
+                  ? (commandResult.stdout || commandResult.content)
                   : commandResult.stderr || commandResult.error,
                 success: commandResult.success,
               });
