@@ -21,30 +21,15 @@ export class GeminiController {
     @Body()
     body: {
       sessionId?: string;
-      message: string;
-      platform: string;
+      message?: string;
+      platform?: string;
       imageBase64?: string;
+      currentWorkingDirectory?: string;
+      tool_response?: { name: string; id: string; result: any };
     },
     @Res() res: Response,
   ) {
     const userId = req.user.id;
     return this.geminiService.generateResponse(userId, body, res);
-  }
-
-  @Post('tool-result')
-  @UseGuards(JwtAuthGuard)
-  async handleToolResult(
-    @Request() req,
-    @Body()
-    body: {
-      sessionId: string;
-      command: string;
-      args: any;
-      result: any;
-    },
-    @Res() res: Response,
-  ) {
-    const userId = req.user.id;
-    return this.geminiService.handleToolResult(userId, body, res);
   }
 }

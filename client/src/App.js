@@ -347,6 +347,7 @@ const App = () => {
   const cwdInputRef = useRef(null);
   const inputRef = useRef(null); // Ref for the textarea
   const focusAfterLoadingRef = useRef(false); // Ref to trigger focus after loading
+  const isNewSessionRef = useRef(false); // Ref to track if we are in a new session flow
 
   const focusInput = () => {
     // Use a timeout to ensure the focus command runs after the current render cycle.
@@ -356,18 +357,28 @@ const App = () => {
   };
 
   useEffect(() => {
-    const fetchHomeDir = async () => {
+    const initializeCwd = async () => {
       try {
         const homeDir = await window.electronAPI.getHomeDir();
+        const lastSessionId = localStorage.getItem('currentSessionId');
+        let initialCwd = homeDir;
+
+        if (lastSessionId) {
+          const savedCwd = localStorage.getItem(`cwd_${lastSessionId}`);
+          if (savedCwd) {
+            initialCwd = savedCwd;
+          }
+        }
+        
         setDefaultCwd(homeDir);
-        setCurrentWorkingDirectory(homeDir); // Set initial CWD
+        setCurrentWorkingDirectory(initialCwd);
       } catch (error) {
-        console.error('Failed to get home directory:', error);
+        console.error('Failed to initialize CWD:', error);
         setDefaultCwd('~'); // Fallback
         setCurrentWorkingDirectory('~');
       }
     };
-    fetchHomeDir();
+    initializeCwd();
   }, []);
 
   useEffect(() => {
@@ -397,7 +408,36 @@ const App = () => {
         throw new Error('Failed to fetch session history');
       }
       const data = await response.json();
-      const formattedHistory = data.conversations.map(c => ({...c, id: c.id || `db-${Math.random()}`})).reverse();
+      
+      const formattedHistory = data.conversations.map(turn => {
+        let newTurn = { ...turn, id: turn.id || `db-${Math.random()}` };
+        
+        // Attempt to parse content if it's a system action result and a string
+        if (newTurn.role === 'system' && newTurn.type === 'action_result' && typeof newTurn.content === 'string') {
+          try {
+            const parsedContent = JSON.parse(newTurn.content);
+            // This is risky if content can be a non-JSON string. Let's be more specific.
+            // A better check would be to see if the string looks like our result object.
+            if (typeof parsedContent === 'object' && parsedContent !== null && ('success' in parsedContent)) {
+               newTurn.content = parsedContent.content; // Or whatever structure is expected
+               newTurn.success = parsedContent.success;
+            }
+          } catch (e) {
+            // It wasn't a JSON string, so leave it as is.
+          }
+        } else if (newTurn.role === 'model' && typeof newTurn.content === 'string') {
+            try {
+                const parsedContent = JSON.parse(newTurn.content);
+                if (typeof parsedContent === 'object' && parsedContent !== null && parsedContent.action) {
+                    // It's a tool call, keep it as a string for renderTurn to parse
+                }
+            } catch(e) {
+                // Not a tool call, it's just text.
+            }
+        }
+
+        return newTurn;
+      }).reverse();
 
       const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
       setCurrentWorkingDirectory(savedCwd || defaultCwd);
@@ -420,15 +460,16 @@ const App = () => {
       console.error('executeToolCall called with invalid toolCall:', toolCall);
       return;
     }
-    const commandExecutionTurn = {
-      id: `exec-${toolCall.id}`,
-      role: 'system',
-      type: 'action',
-      content: `> **${toolCall.name}**: \`${toolCall.args.command} ${toolCall.args.args.join(' ')}\``,
-    };
-    setConversation(prev => [...prev, commandExecutionTurn]);
 
     if (toolCall.name === 'runCommand') {
+        const commandExecutionTurn = {
+          id: `exec-${toolCall.id}`,
+          role: 'system',
+          type: 'action',
+          content: `> **runCommand**: \`${toolCall.args.command} ${(toolCall.args.args || []).join(' ')}\``,
+        };
+        setConversation(prev => [...prev, commandExecutionTurn]);
+
       const result = await window.electronAPI.runCommand({...toolCall.args, cwd: currentWorkingDirectory});
       const resultTurn = {
         id: `result-${toolCall.id}`,
@@ -442,8 +483,48 @@ const App = () => {
     } else if (toolCall.name === 'editFile') {
       const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
       setEditProposal({ ...toolCall.args, originalContent });
+    } else if (toolCall.name === 'readFile') {
+      const readFileTurn = {
+        id: `exec-${toolCall.id}`,
+        role: 'system',
+        type: 'action',
+        content: `> **readFile**: Reading file \`${toolCall.args.filePath}\``,
+      };
+      setConversation(prev => [...prev, readFileTurn]);
+
+      const result = await window.electronAPI.readFile(toolCall.args.filePath);
+
+      const resultTurn = {
+          id: `result-${toolCall.id}`,
+          role: 'system',
+          type: 'action_result',
+          success: result.success,
+          content: result.success ? result.content : result.error,
+      };
+      setConversation(prev => [...prev, resultTurn]);
+      
+      if (result.success) {
+        await sendToolResult(toolCall.name, toolCall.id, result.content);
+      } else {
+        await sendToolResult(toolCall.name, toolCall.id, { error: result.error });
+      }
     } else if (toolCall.name === 'createScript') {
+      const createScriptTurn = {
+        id: `exec-${toolCall.id}`,
+        role: 'system',
+        type: 'action',
+        content: `> **createScript**: \`${toolCall.args.scriptName}\``,
+      };
+      setConversation(prev => [...prev, createScriptTurn]);
       const result = await window.electronAPI.createScript(toolCall.args);
+      const resultTurn = {
+        id: `result-${toolCall.id}`,
+        role: 'system',
+        type: 'action_result',
+        content: result.stdout || result.stderr || result.error,
+        success: result.success,
+      };
+      setConversation(prev => [...prev, resultTurn]);
       await sendToolResult(toolCall.name, toolCall.id, result);
     }
   }
@@ -500,30 +581,37 @@ const App = () => {
               const newConversation = [...prev];
               const lastTurn = newConversation[newConversation.length - 1];
               if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                if (lastTurn.content.trim() === '') {
+                if (lastTurn.content.trim() === '' && !finalPayload.action) {
                   return newConversation.slice(0, -1);
                 }
                 lastTurn.isStreaming = false;
+                // If there's an action, make sure it's part of the content for rendering
+                if (finalPayload.action) {
+                    lastTurn.content = JSON.stringify({ action: finalPayload.action, parameters: finalPayload.parameters });
+                }
+              } else if (finalPayload.action) {
+                // If there was no streaming text but there is an action, create a new turn for it.
+                newConversation.push({
+                  id: `model-${Date.now()}`,
+                  role: 'model',
+                  content: JSON.stringify({ action: finalPayload.action, parameters: finalPayload.parameters }),
+                  isStreaming: false,
+                });
               }
               return newConversation;
             });
 
             if (finalPayload.action) {
-              const lastMessage = conversationStateRef.current[conversationStateRef.current.length - 1];
               const toolCall = {
                 name: finalPayload.action,
-                id: lastMessage ? lastMessage.id : `tool-call-${Date.now()}`,
+                id: `tool-call-${Date.now()}`,
                 args: finalPayload.parameters
               };
 
-              if (['runCommand', 'readFile', 'runScript'].includes(toolCall.name)) {
-                await executeToolCall(toolCall);
-              } else if (toolCall.name === 'editFile') {
-                setEditProposal({ ...finalPayload.parameters, originalContent: 'loading', cwd: currentWorkingDirectory });
-              } else {
-                const replyContent = finalPayload.parameters?.content || '```json\n' + JSON.stringify(finalPayload, null, 2) + '\n```';
-                setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: replyContent, isStreaming: false }]);
-              }
+              // We need a slight delay to ensure the state update from above is processed
+              // before we start executing the tool call which might also update the state.
+              setTimeout(() => executeToolCall(toolCall), 50);
+
             } else if (finalPayload.parameters?.content) {
               setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
             }
@@ -536,7 +624,7 @@ const App = () => {
   }
 
   async function sendToolResult(toolCallName, toolCallId, output) {
-    if (!sessionIdRef.current || sessionIdRef.current === 'temp') {
+    if (!currentSessionId || currentSessionId === 'temp') {
       console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
       return;
     }
@@ -545,15 +633,23 @@ const App = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({
-          sessionId: sessionIdRef.current,
+          sessionId: currentSessionId,
+          platform: window.navigator.platform,
+          currentWorkingDirectory: currentWorkingDirectory,
           tool_response: { name: toolCallName, id: toolCallId, result: output }
         }),
       });
+
+      if (response.status === 401) {
+        handleLogout();
+        return;
+      }
+      
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Failed to send tool result and get follow-up.');
       }
-      await processStream(response, sessionIdRef.current);
+      await processStream(response, currentSessionId);
     } catch (error) {
       console.error('Tool result submission or follow-up stream failed:', error);
       setConversation(prev => [...prev, {
@@ -568,13 +664,25 @@ const App = () => {
       setToken(storedToken);
       setIsAuthenticated(true);
       fetchSessions(storedToken);
+      
+      const lastSessionId = localStorage.getItem('currentSessionId');
+      if (lastSessionId) {
+        setCurrentSessionId(lastSessionId);
+      }
     }
   }, []);
 
   useEffect(() => {
     // Fetch history when session changes, but not for new temporary sessions
     if (currentSessionId && currentSessionId !== 'temp') {
-      fetchSessionHistory(currentSessionId, 1, false);
+      if (isNewSessionRef.current) {
+        // This is a new session that was just created. The conversation is already in state.
+        // Don't fetch history, just reset the flag.
+        isNewSessionRef.current = false;
+      } else {
+        // This is an existing session the user switched to, so fetch its history.
+        fetchSessionHistory(currentSessionId, 1, false);
+      }
     }
   }, [currentSessionId, fetchSessionHistory]);
   
@@ -587,6 +695,9 @@ const App = () => {
 
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
+    if (currentSessionId && currentSessionId !== 'temp') {
+      localStorage.setItem('currentSessionId', currentSessionId);
+    }
   }, [currentSessionId]);
 
   useEffect(() => {
@@ -644,10 +755,12 @@ const App = () => {
     setHasMore(true);
     setCurrentPage(1);
     focusAfterLoadingRef.current = true; // Set ref to focus after potential loading
+    isNewSessionRef.current = true; // Flag that we are starting a new session
   };
 
   const handleSessionClick = (sessionId) => {
     if (sessionId === currentSessionId) return;
+    isNewSessionRef.current = false; // Flag that we are switching to an existing session
     setCurrentSessionId(sessionId);
     const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
     if (defaultCwd) setCurrentWorkingDirectory(savedCwd || defaultCwd);
@@ -683,6 +796,7 @@ const App = () => {
 
       let sessionIdToSend = currentSessionId;
       if (!sessionIdToSend) {
+        isNewSessionRef.current = true; // Flag that this is a new session
         sessionIdToSend = 'temp';
         const newTempSession = { id: 'temp', title: userMessage.substring(0, 30) };
         setSessions(prev => [newTempSession, ...prev]);
@@ -791,14 +905,34 @@ const App = () => {
       case 'model':
         turnRoleClass = 'assistant';
         let modelContent;
-        try {
-          modelContent = JSON.parse(turn.content);
-        } catch (e) {
-          modelContent = turn.content; // It's just a string
-        }
+        let isActionResult = false;
+        let actionResultSuccess = false;
 
-        if (typeof modelContent === 'object' && modelContent !== null && modelContent.action === 'runCommand') {
-          turnContent = <CommandExecution command={modelContent.parameters.command} args={modelContent.parameters.args || []} />;
+        try {
+          // Check if turn.content is a string that looks like JSON
+          if (typeof turn.content === 'string' && turn.content.trim().startsWith('{')) {
+              modelContent = JSON.parse(turn.content);
+              if (modelContent.type === 'action_result') {
+                isActionResult = true;
+                actionResultSuccess = modelContent.success;
+                modelContent = modelContent.content;
+              }
+          } else {
+              modelContent = turn.content; // It's just a string
+          }
+        } catch (e) {
+          modelContent = turn.content;
+        }
+        
+        if (isActionResult) {
+          turnContent = <CommandResult success={actionResultSuccess} content={modelContent} />;
+        } else if (typeof modelContent === 'object' && modelContent !== null && modelContent.action) {
+            const { action, parameters } = modelContent;
+            let commandString = '';
+            if (action === 'runCommand' && parameters.args) {
+                commandString = parameters.args.join(' ');
+            }
+            turnContent = <CommandExecution command={action} args={[commandString]} />;
         } else {
            turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         }

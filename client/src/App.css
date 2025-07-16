@@ -707,6 +707,12 @@ body {
   color: var(--background-color);
 }
 
+.command-result-container pre,
+.command-result-container code {
+  white-space: pre-wrap; /* Allow wrapping for long lines */
+  word-break: break-all; /* Break long words or paths */
+}
+
 
 /* --- Edit File Proposal Modal --- */
 .edit-proposal-overlay {

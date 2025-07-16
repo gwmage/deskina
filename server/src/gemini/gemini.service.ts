@@ -121,35 +121,35 @@ export class GeminiService {
   }
 
   private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
-    return `You are "Deskina," a hyper-competent AI agent. Your goal is to achieve the user's objective with the minimum number of conversational turns. Be proactive and decisive.
+    const isWindows = platform.toLowerCase().startsWith('win');
+    const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
 
-You are currently operating in the directory: ${currentWorkingDirectory}
+    const examples = isWindows
+      ? `  - List files: \`dir\`\n  - Find files: \`dir /s /b "FILENAME"\`\n  - Read file: \`type "FILEPATH"\`\n  - Check current directory: \`cd\` or \`echo %cd%\``
+      : `  - List files: \`ls -l\`\n  - Find files: \`find . -name "FILENAME"\`\n  - Read file: \`cat "FILEPATH"\`\n  - Check current directory: \`pwd\``;
 
-**Core Operating Principles:**
+    return `You are "Deskina," a helpful AI assistant.
 
-1.  **Find Files First (Top Priority Rule):** If the user mentions a specific filename (e.g., "analyze App.js," "find my-script.py," "read config.json"), your immediate and only first action is to run the recursive search command for that file. **Do not list the directory first.**
-    *   **Windows:** Use \`dir /s /b FILENAME\`
-    *   **macOS/Linux:** Use \`find . -name "FILENAME"\`
-    *   After the command returns the full path, use \`readFile\` on that path.
+**CONTEXT:**
+- **Operating System:** You are on **${osName}**. Use commands compatible with this OS.
+- **Current Directory:** \`${currentWorkingDirectory}\`
+- **Command Examples for ${osName}:**
+${examples}
 
-2.  **Master the Command Line:** For all other tasks, your \`runCommand\` tool is a direct interface to the user's OS shell. You can and should use any command-line tool to accomplish the goal.
-    *   **Think like a power user:** Use \`grep\`/\`findstr\`, \`netstat\`, \`ps\`/\`tasklist\`, \`curl\`, etc.
-    *   **Don't describe your plan.** Just execute the first logical command.
+**YOUR WORKFLOW:**
 
-3.  **No Excuses, Only Solutions (The Scripting Mandate):** It is absolutely forbidden for you to say "I cannot do that," "I can't," or any similar phrase of refusal. If you determine a task is impossible using the command line, your one and only path forward is to call the \`createScript\` tool. Write a Python script to solve the problem. There is no other option. Giving up is not an option.
-    *   **Use Case:** Complex logic, API interaction, data processing, file manipulation, etc. If the CLI is clumsy, write a script.
+1.  The user asks a question (e.g., "What is the current directory?").
+2.  You use a tool to find the answer (e.g., \`runCommand: cd\`).
+3.  The tool's result is given back to you.
+4.  **Your next and final response MUST be a complete, user-friendly sentence in Korean that answers the user's original question.**
+    *   **Correct Example:** "현재 작업 경로는 \`C:\\Users\\...\` 입니다."
+    *   **Incorrect Example:** Just outputting the tool call result.
 
-4.  **Autonomous Workflow (for general analysis):** When given a *vague* task without a specific filename (e.g., "analyze this project"):
-    a. Start by listing files with \`runCommand\` to understand the context.
-    b. Based on the file list, form a multi-step plan in your head.
-    c. Execute the plan step-by-step using tool calls.
-    d. **Only after you have all the information** should you respond with a text summary.
-
-5.  **No Useless Questions:** Never ask for information you can get with a tool. Decide for yourself and act.
-
-6.  **Tool Calls are Your Voice:** Use tools as your primary way of acting. If a tool fails, analyze the error and try a different command or arguments.
-
-7.  **Language:** All final text analysis and responses to direct questions must be in Korean.`;
+**IMPORTANT RULES:**
+- **Always Answer in Korean:** All final, user-facing text must be in Korean.
+- **Autonomous Error Correction:** If a command fails because it's for the wrong OS, **do not ask the user,** immediately try the correct command for **${osName}**.
+- **Be Proactive:** Use tools to get answers. Do not explain your plan, just act.
+- **No Surrender:** If you cannot get the information with commands, use the \`createScript\` tool. Never give up.`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -163,6 +163,9 @@ You are currently operating in the directory: ${currentWorkingDirectory}
     chat: ChatSession,
     initialParts: Part[],
   ) {
+    this.logger.log('--- final data sent to AI ---');
+    this.logger.log(JSON.stringify(initialParts, null, 2));
+
     const stream =
       initialParts.length > 0
         ? await chat.sendMessageStream(initialParts)
@@ -233,7 +236,7 @@ You are currently operating in the directory: ${currentWorkingDirectory}
       message?: string;
       platform?: string;
       imageBase64?: string;
-      currentWorkingDirectory?: string; // Add CWD
+      currentWorkingDirectory?: string;
       tool_response?: { name: string; id: string; result: any };
     },
     res: Response,
@@ -253,36 +256,74 @@ You are currently operating in the directory: ${currentWorkingDirectory}
             `data: ${JSON.stringify({ type: 'session_id', payload: sessionId })}\n\n`,
           );
         } else {
-          // tool_response만 있고 세션 ID가 없는 경우는 비정상적 상황
-          throw new Error('Cannot process tool result without a valid session ID.');
+          throw new Error('Cannot process request without a valid session ID.');
         }
       }
 
-      // 1. 대화 기록을 가져옵니다.
-      const history = await this.sessionService.getConversations(sessionId);
+      const rawHistory = await this.sessionService.getConversations(sessionId);
       
-      // 2. tool_response가 있는 경우, 대화 기록에 추가합니다.
-      if (tool_response) {
-        // DB에 tool 결과를 저장합니다.
-        // 클라이언트에서 받은 raw result를 functionResponse 형식으로 감싸서 저장합니다.
-        const functionResponsePart = {
-          functionResponse: {
-            name: tool_response.name,
-            response: tool_response.result,
-          },
-        };
+      const history = rawHistory
+        .map(h => {
+          if (h.role === 'model' && h.parts && h.parts[0]?.text) {
+            try {
+              const parsed = JSON.parse(h.parts[0].text);
+              if (parsed.action && parsed.parameters) {
+                return {
+                  role: 'model',
+                  parts: [{ functionCall: { name: parsed.action, args: parsed.parameters } }],
+                };
+              }
+              if (parsed.type === 'action_result') {
+                return null;
+              }
+            } catch (e) {}
+          }
+          return h;
+        })
+        .filter(Boolean);
+
+      let partsForAI: Part[] = [];
+
+      if (message) {
+        await this.sessionService.addConversation(sessionId, 'user', message, imageBase64);
+        partsForAI.push({ text: message });
+        if (imageBase64) {
+          partsForAI.push(this.convertBase64ToPart(imageBase64, 'image/png'));
+        }
+      } else if (tool_response) {
+        let processedResult: any;
+        let success = false;
+        if (tool_response.result && typeof tool_response.result === 'object') {
+            const result = tool_response.result;
+            success = result.success;
+            if (result.success) {
+                processedResult = (result.stdout ?? '') + (result.content ?? '') || 'Command executed successfully with no output.';
+            } else {
+                processedResult = `Error: ${(result.stderr ?? '') + (result.error ?? '') || 'Command failed with no error message.'}`;
+            }
+        } else {
+            success = true;
+            processedResult = tool_response.result ?? 'No result provided.';
+        }
 
         await this.sessionService.addConversation(
-          sessionId,
-          'tool',
-          JSON.stringify(functionResponsePart),
+          sessionId, 'model', JSON.stringify({ type: 'action_result', content: processedResult, success })
         );
         
-        // 현재 대화 세션(Gemini)에 이 결과를 반영합니다.
-        history.push({
-          role: 'function',
-          parts: [functionResponsePart],
+        partsForAI.push({
+          functionResponse: {
+            name: tool_response.name,
+            response: { output: processedResult },
+          },
         });
+        
+        // Add the function call that led to this result to the history for context
+        const lastTurn = history[history.length -1];
+        if (lastTurn?.role === 'model' && lastTurn.parts[0]?.functionCall) {
+          // It's already in the history from the parsing logic
+        } else {
+          // This case might need handling if the flow changes, for now it's okay.
+        }
       }
 
       const chat = this.getModelWithTools().startChat({
@@ -292,27 +333,9 @@ You are currently operating in the directory: ${currentWorkingDirectory}
           parts: [{ text: this.getSystemPrompt(platform, currentWorkingDirectory) }],
         },
       });
+      
+      await this.executeAndRespond(res, userId, sessionId, chat, partsForAI);
 
-      // 3. tool_response가 아닌 일반 메시지인 경우, 대화를 시작합니다.
-      if (message) {
-        const userParts: Part[] = [{ text: message }];
-        if (imageBase64) {
-          userParts.push(this.convertBase64ToPart(imageBase64, 'image/png'));
-        }
-  
-        await this.sessionService.addConversation(
-          sessionId,
-          'user',
-          message,
-          imageBase64,
-        );
-        
-        await this.executeAndRespond(res, userId, sessionId, chat, userParts);
-
-      } else if (tool_response) {
-        // 4. tool_response만 있는 경우, 빈 메시지를 보내 AI의 후속 응답을 유도합니다.
-        await this.executeAndRespond(res, userId, sessionId, chat, []);
-      }
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId}:`, error.stack);
       if (!res.writableEnded) {
@@ -337,59 +360,6 @@ You are currently operating in the directory: ${currentWorkingDirectory}
       if (!res.writableEnded) {
         res.end();
       }
-    }
-  }
-
-  async handleToolResult(
-    userId: string,
-    body: { sessionId: string; command:string; args: any; result: any, currentWorkingDirectory?: string },
-    res: Response,
-  ) {
-    const { sessionId, command, args, result, currentWorkingDirectory } = body;
-    
-    const toolExecutionResult: Part = {
-      functionResponse: {
-        name: command, 
-        response: result,
-      },
-    };
-
-    try {
-        await this.sessionService.addConversation(sessionId, 'tool', JSON.stringify(toolExecutionResult));
-        
-        const history = await this.sessionService.getConversations(sessionId);
-        const chat = this.getModelWithTools().startChat({
-            history: history.slice(0, -1), // 마지막 tool 응답은 제외하고 history 구성
-            systemInstruction: { role: 'user', parts: [{ text: this.getSystemPrompt('win32', currentWorkingDirectory) }] }, 
-        });
-
-        // tool 응답을 다음 메시지로 전달
-        await this.executeAndRespond(res, userId, sessionId, chat, [toolExecutionResult]);
-
-    } catch (error) {
-        this.logger.error(`Error handling tool result for user ${userId}:`, error.stack);
-        if (!res.writableEnded) {
-            const errorMessage = error.message || '';
-            let userFriendlyMessage = '도구 실행 결과 처리 중 오류가 발생했습니다.';
-    
-            if (errorMessage.includes('429') || errorMessage.toLowerCase().includes('quota')) {
-              userFriendlyMessage = 'Google AI API 일일 사용량을 초과했습니다. 잠시 후 다시 시도해주세요.';
-            } else if (errorMessage.toLowerCase().includes('safety')) {
-              userFriendlyMessage = '요청 또는 응답이 안전 정책에 의해 차단되었습니다. 다른 방식으로 질문해주세요.';
-            }
-
-            if (sessionId) {
-              await this.sessionService.addConversation(sessionId, 'model', userFriendlyMessage);
-            }
-            
-            res.write(
-              `data: ${JSON.stringify({ type: 'error', payload: { message: userFriendlyMessage } })}\n\n`,
-            );
-        }
-    } finally {
-        if (!res.writableEnded) {
-            res.end();
-        }
     }
   }
 }
