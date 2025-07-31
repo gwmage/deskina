@@ -76,32 +76,33 @@ export class SessionService {
         const modelTurn = history[i + 1];
 
         try {
-          const modelAction = JSON.parse(modelTurn.content);
+          const parsedModelContent = JSON.parse(modelTurn.content);
+          
+          // Check for the new `functionCall` structure
+          if (parsedModelContent.functionCall) {
+            const { name, args } = parsedModelContent.functionCall;
+            const toolResult = JSON.parse(toolTurn.content);
 
-          if (modelAction.action === 'runCommand' || modelAction.action === 'runScript' || modelAction.action === 'readFile') {
-            const toolContentObject = JSON.parse(toolTurn.content);
-            // Check for both legacy and new structures
-            const commandResult = toolContentObject.functionResponse?.response || toolContentObject;
-
-            if (commandResult) {
-              const commandStr =
-                modelAction.action === 'runCommand'
-                  ? `${modelAction.parameters.command} ${modelAction.parameters.args.join(' ')}`
-                  : modelAction.action === 'runScript'
-                  ? `python ${modelAction.parameters.name}`
-                  : `${modelAction.parameters.filePath}`;
+            if (toolResult) {
+              let commandStr = '';
+              if (name === 'runCommand') {
+                commandStr = `${args.command} ${(args.args || []).join(' ')}`;
+              } else if (name === 'runScript') {
+                commandStr = `python ${args.name}`;
+              } else if (name === 'readFile') {
+                commandStr = `${args.filePath}`;
+              }
               
-              // desc 배열을 유지하기 위해 push를 사용합니다.
-              // 클라이언트가 reverse() 할 것을 예상하여, result를 action보다 먼저 push 합니다.
+              // desc 순서 유지를 위해 result를 먼저 push
               clientHistory.push({
                 ...toolTurn,
                 id: toolTurn.id + '-result',
                 role: 'system',
                 type: 'action_result',
-                content: commandResult.success
-                  ? (commandResult.stdout || commandResult.content)
-                  : commandResult.stderr || commandResult.error,
-                success: commandResult.success,
+                content: toolResult.success
+                  ? (toolResult.stdout || toolResult.content || 'Execution successful with no output.')
+                  : (toolResult.stderr || toolResult.error || 'Execution failed.'),
+                success: toolResult.success,
               });
 
               clientHistory.push({
@@ -109,16 +110,16 @@ export class SessionService {
                 id: modelTurn.id + '-action',
                 role: 'system',
                 type: 'action',
-                content: `> **${modelAction.action}**: \`${commandStr}\``,
+                content: `> **${name}**: \`${commandStr}\``,
               });
 
               processedIndices.add(i);
               processedIndices.add(i + 1);
-              continue;
+              continue; // 이 두 턴은 처리되었으므로 건너뜁니다.
             }
           }
         } catch (e) {
-          this.logger.warn(`Failed to process action/result pair: ${e}`);
+          this.logger.warn(`Failed to process action/result pair for client: ${e}`);
         }
       }
 
@@ -159,7 +160,11 @@ export class SessionService {
       } else if (turn.role === 'model') {
         try {
           const parsed = JSON.parse(turn.content);
-          if (parsed.action && parsed.parameters) {
+          // `functionCall` 객체 구조를 우선적으로 확인합니다.
+          if (parsed.functionCall) {
+            parts.push({ functionCall: parsed.functionCall });
+          // 레거시 `action`/`parameters` 형식을 지원합니다.
+          } else if (parsed.action && parsed.parameters) {
             parts.push({ functionCall: { name: parsed.action, args: parsed.parameters } });
           } else {
             parts.push({ text: turn.content });
@@ -169,16 +174,21 @@ export class SessionService {
         }
         apiHistory.push({ role: 'model', parts });
 
-      } else if (turn.role === 'function' || turn.role === 'tool') { // Legacy 'tool' support
-        // A function/tool response always follows a model's function call.
+      } else if (turn.role === 'function' || turn.role === 'tool') { // 'tool' 레거시 지원
+        // 함수/툴 응답은 항상 모델의 함수 호출 뒤에 옵니다.
         const modelTurn = apiHistory[apiHistory.length - 1];
         if (modelTurn && modelTurn.role === 'model' && modelTurn.parts[0]?.functionCall) {
           try {
-            const toolResult = JSON.parse(turn.content);
+            const toolResultObject = JSON.parse(turn.content);
+            // 저장된 결과 객체를 AI가 기대하는 { output: '...' } 형식으로 변환합니다.
+            const output = toolResultObject.success
+              ? (toolResultObject.stdout || toolResultObject.content || 'Command executed successfully with no output.')
+              : `Error: ${toolResultObject.stderr || toolResultObject.error || 'Command failed with no error message.'}`;
+
             parts.push({
               functionResponse: {
                 name: modelTurn.parts[0].functionCall.name,
-                response: { output: toolResult.content },
+                response: { output },
               },
             });
             apiHistory.push({ role: 'function', parts });

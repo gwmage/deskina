@@ -462,15 +462,10 @@ const App = () => {
     }
 
     if (toolCall.name === 'runCommand') {
-        const commandExecutionTurn = {
-          id: `exec-${toolCall.id}`,
-          role: 'system',
-          type: 'action',
-          content: `> **runCommand**: \`${toolCall.args.command} ${(toolCall.args.args || []).join(' ')}\``,
-        };
-        setConversation(prev => [...prev, commandExecutionTurn]);
-
+      // The server will now create and return the system messages,
+      // so we no longer create temporary ones on the client.
       const result = await window.electronAPI.runCommand({...toolCall.args, cwd: currentWorkingDirectory});
+      // We still need to add the result turn to the conversation immediately for UI feedback.
       const resultTurn = {
         id: `result-${toolCall.id}`,
         role: 'system',
@@ -484,14 +479,7 @@ const App = () => {
       const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
       setEditProposal({ ...toolCall.args, originalContent });
     } else if (toolCall.name === 'readFile') {
-      const readFileTurn = {
-        id: `exec-${toolCall.id}`,
-        role: 'system',
-        type: 'action',
-        content: `> **readFile**: Reading file \`${toolCall.args.filePath}\``,
-      };
-      setConversation(prev => [...prev, readFileTurn]);
-
+       // The server will create the "Reading file..." message.
       const result = await window.electronAPI.readFile(toolCall.args.filePath);
 
       const resultTurn = {
@@ -502,20 +490,10 @@ const App = () => {
           content: result.success ? result.content : result.error,
       };
       setConversation(prev => [...prev, resultTurn]);
-      
-      if (result.success) {
-        await sendToolResult(toolCall.name, toolCall.id, result.content);
-      } else {
-        await sendToolResult(toolCall.name, toolCall.id, { error: result.error });
-      }
+      await sendToolResult(toolCall.name, toolCall.id, result);
+
     } else if (toolCall.name === 'createScript') {
-      const createScriptTurn = {
-        id: `exec-${toolCall.id}`,
-        role: 'system',
-        type: 'action',
-        content: `> **createScript**: \`${toolCall.args.scriptName}\``,
-      };
-      setConversation(prev => [...prev, createScriptTurn]);
+      // The server will create the "createScript" action message.
       const result = await window.electronAPI.createScript(toolCall.args);
       const resultTurn = {
         id: `result-${toolCall.id}`,
@@ -574,55 +552,36 @@ const App = () => {
                 return [...newConversation, { id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true }];
               }
             });
+          } else if (data.type === 'action') {
+            const toolCall = {
+              name: data.payload.name,
+              id: `tool-call-${Date.now()}`,
+              args: data.payload.args
+            };
+            // 'action' 이벤트를 받으면 즉시 도구를 실행합니다.
+            // 로딩 상태는 sendToolResult 함수가 관리하므로 여기서 바꿀 필요가 없습니다.
+            executeToolCall(toolCall);
           } else if (data.type === 'error') {
             setConversation(prev => [...prev, {
               id: `error-${Date.now()}`, role: 'system', content: `Error processing tool result: ${data.payload.message}`, isComplete: true, isError: true
             }]);
             setIsLoading(false);
           } else if (data.type === 'final') {
-            const finalPayload = data.payload;
+            // 'final' 이벤트는 이제 대화 턴의 종료만을 의미합니다.
+            // 로딩 상태를 false로 설정하고 스트리밍 상태를 업데이트합니다.
             setConversation(prev => {
               const newConversation = [...prev];
               const lastTurn = newConversation[newConversation.length - 1];
               if (lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming) {
-                if (lastTurn.content.trim() === '' && !finalPayload.action) {
-                  return newConversation.slice(0, -1);
+                // 스트리밍 중이던 빈 메시지 풍선이 있었다면 제거합니다.
+                if (lastTurn.content.trim() === '') {
+                   return newConversation.slice(0, -1);
                 }
                 lastTurn.isStreaming = false;
-                // If there's an action, make sure it's part of the content for rendering
-                if (finalPayload.action) {
-                    lastTurn.content = JSON.stringify({ action: finalPayload.action, parameters: finalPayload.parameters });
-                }
-              } else if (finalPayload.action) {
-                // If there was no streaming text but there is an action, create a new turn for it.
-                newConversation.push({
-                  id: `model-${Date.now()}`,
-                  role: 'model',
-                  content: JSON.stringify({ action: finalPayload.action, parameters: finalPayload.parameters }),
-                  isStreaming: false,
-                });
               }
               return newConversation;
             });
-
-            if (finalPayload.action) {
-              const toolCall = {
-                name: finalPayload.action,
-                id: `tool-call-${Date.now()}`,
-                args: finalPayload.parameters
-              };
-
-              // We need a slight delay to ensure the state update from above is processed
-              // before we start executing the tool call which might also update the state.
-              setTimeout(() => executeToolCall(toolCall), 50);
-
-            } else {
-              // If there's no action, the process is complete.
-              setIsLoading(false);
-            }
-             if (finalPayload.parameters?.content) {
-              setConversation(prev => [...prev, { id: `model-${Date.now()}`, role: 'model', content: finalPayload.parameters.content, isStreaming: false }]);
-            }
+            setIsLoading(false);
           }
         } catch (e) {
           console.error('Failed to parse JSON line:', line, e);
@@ -632,8 +591,13 @@ const App = () => {
   }
 
   async function sendToolResult(toolCallName, toolCallId, output) {
-    if (!currentSessionId || currentSessionId === 'temp') {
-      console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.');
+    const sessionId = sessionIdRef.current; // ALWAYS use the ref to get the latest session ID
+    if (!sessionId || sessionId === 'temp') {
+      console.error('sendToolResult: Invalid or temporary Session ID. Aborting submission.', sessionId);
+      setIsLoading(false); // Stop loading if we can't proceed.
+      setConversation(prev => [...prev, {
+        id: `error-${Date.now()}`, role: 'system', content: `Error: Could not continue conversation due to missing session ID.`
+      }]);
       return;
     }
     setIsLoading(true); // Start loading when sending a tool result
@@ -642,7 +606,7 @@ const App = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({
-          sessionId: currentSessionId,
+          sessionId: sessionId, // Use the most up-to-date session ID from the ref
           platform: window.navigator.platform,
           currentWorkingDirectory: currentWorkingDirectory,
           tool_response: { name: toolCallName, id: toolCallId, result: output }
@@ -658,7 +622,7 @@ const App = () => {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Failed to send tool result and get follow-up.');
       }
-      await processStream(response, currentSessionId);
+      await processStream(response, sessionId);
     } catch (error) {
       console.error('Tool result submission or follow-up stream failed:', error);
       setConversation(prev => [...prev, {
@@ -914,37 +878,17 @@ const App = () => {
       case 'model':
         turnRoleClass = 'assistant';
         let modelContent;
-        let isActionResult = false;
-        let actionResultSuccess = false;
 
         try {
-          // Check if turn.content is a string that looks like JSON
-          if (typeof turn.content === 'string' && turn.content.trim().startsWith('{')) {
-              modelContent = JSON.parse(turn.content);
-              if (modelContent.type === 'action_result') {
-                isActionResult = true;
-                actionResultSuccess = modelContent.success;
-                modelContent = modelContent.content;
-              }
-          } else {
-              modelContent = turn.content; // It's just a string
-          }
+          // The server now sends system messages for actions,
+          // so we only need to handle plain text for model turns.
+          modelContent = turn.content;
         } catch (e) {
           modelContent = turn.content;
         }
         
-        if (isActionResult) {
-          turnContent = <CommandResult success={actionResultSuccess} content={modelContent} />;
-        } else if (typeof modelContent === 'object' && modelContent !== null && modelContent.action) {
-            const { action, parameters } = modelContent;
-            let commandString = '';
-            if (action === 'runCommand' && parameters.args) {
-                commandString = parameters.args.join(' ');
-            }
-            turnContent = <CommandExecution command={action} args={[commandString]} />;
-        } else {
-           turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
-        }
+        // Model turns are now only for text responses.
+        turnContent = <ReactMarkdown children={modelContent} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         break;
 
       case 'tool':

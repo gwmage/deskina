@@ -183,16 +183,15 @@ ${examples}
     this.logger.log('--- final data sent to AI ---');
     this.logger.log(JSON.stringify(initialParts, null, 2));
 
-    const stream =
+    const result =
       initialParts.length > 0
         ? await chat.sendMessageStream(initialParts)
         : await chat.sendMessageStream('');
 
     let fullResponseText = '';
-    let functionCall: { name: string; args: any; } | null = null;
-
-    for await (const chunk of stream.stream) {
-      // 텍스트가 있으면 스트리밍합니다.
+    
+    // 텍스트를 클라이언트에 스트리밍합니다.
+    for await (const chunk of result.stream) {
       const chunkText = chunk.text();
       if (chunkText) {
         fullResponseText += chunkText;
@@ -200,48 +199,34 @@ ${examples}
           `data: ${JSON.stringify({ type: 'text_chunk', payload: chunkText })}\n\n`,
         );
       }
-
-      // 함수 호출이 있으면 저장하고 루프를 빠져나갑니다.
-      const call = chunk.functionCalls()?.[0];
-      if (call) {
-        functionCall = call;
-        break;
-      }
     }
+    
+    // 스트림이 완전히 끝난 후, 최종 응답에서 함수 호출을 확인합니다.
+    const finalResponse = await result.response;
+    const functionCalls = finalResponse.functionCalls();
 
-    // 스트리밍 후 DB에 모델 응답(텍스트 또는 함수 호출)을 저장합니다.
-    if (functionCall) {
+    if (functionCalls && functionCalls.length > 0) {
+      // 함수 호출이 있으면, DB에 저장하고 클라이언트에 'action' 이벤트를 보냅니다.
+      const call = functionCalls[0];
        await this.sessionService.addConversation(
         sessionId,
         'model',
-        JSON.stringify({ action: functionCall.name, parameters: functionCall.args }),
+        JSON.stringify({ functionCall: call }),
        );
+       res.write(`data: ${JSON.stringify({ type: 'action', payload: call })}\n\n`);
+
     } else if (fullResponseText.trim()) {
+      // 텍스트 응답만 있었을 경우, DB에 저장합니다.
+      // 클라이언트는 이미 text_chunk로 내용을 받았으므로 추가 전송은 필요 없습니다.
       await this.sessionService.addConversation(
         sessionId,
         'model',
         fullResponseText,
       );
     }
-
-    // 함수 호출이 있었다면 클라이언트에 액션을 전달합니다.
-    if (functionCall) {
-        // 이 부분은 기존 로직에서 클라이언트 액션을 처리하던 부분을 참고하여 재구성합니다.
-        // 현재는 runCommand, readFile, runScript만 클라이언트 액션입니다.
-        const clientActionTools = ['runCommand', 'readFile', 'runScript', 'editFile', 'createScript'];
-        if (clientActionTools.includes(functionCall.name)) {
-             res.write(`data: ${JSON.stringify({ type: 'final', payload: { action: functionCall.name, parameters: functionCall.args } })}\n\n`);
-        } else {
-            // 서버에서 처리해야 할 툴 (e.g. listScripts)
-            // 이 부분은 현재 구현에서 제외되었으므로, 일단 경고만 남깁니다.
-            this.logger.warn(`Server-side tool call '${functionCall.name}' is not handled in this flow.`);
-             res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
-        }
-    } else {
-        // 텍스트 응답만 있었던 경우
-        res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
-    }
-
+    
+    // 대화 턴의 종료를 알립니다.
+    res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
     res.end();
   }
 
@@ -329,59 +314,24 @@ ${examples}
           partsForAI.push(this.convertBase64ToPart(imageBase64, 'image/png'));
         }
       } else if (tool_response) {
-        let processedResult: any;
-        let success = false;
-        if (tool_response.result && typeof tool_response.result === 'object') {
-            const result = tool_response.result;
-            success = result.success;
-            if (result.success) {
-                processedResult = ((result.stdout ?? '') + (result.content ?? '')).trim();
-
-                if (tool_response.name === 'runCommand' && processedResult.includes('\n')) {
-                    const paths = processedResult.split(/\r?\n/).map(p => p.trim()).filter(Boolean);
-                    if (paths.length > 1) {
-                        const relevantPaths = paths.filter(p => p.startsWith(currentWorkingDirectory));
-                        if (relevantPaths.length > 0) {
-                            relevantPaths.sort((a, b) => a.length - b.length);
-                            processedResult = relevantPaths[0];
-                            this.logger.log(`Multiple paths found, selected the most relevant: ${processedResult}`);
-                        } else {
-                            paths.sort((a, b) => a.length - b.length);
-                            processedResult = paths[0];
-                            this.logger.log(`No paths in CWD, selected the shortest overall: ${processedResult}`);
-                        }
-                    }
-                }
-
-                if (!processedResult) {
-                    processedResult = 'Command executed successfully with no output.';
-                }
-            } else {
-                processedResult = `Error: ${(result.stderr ?? '') + (result.error ?? '') || 'Command failed with no error message.'}`;
-            }
-        } else {
-            success = true;
-            processedResult = tool_response.result ?? 'No result provided.';
-        }
-
+        const result = tool_response.result;
+        
+        // 클라이언트가 보낸 원본 결과 객체를 DB에 저장합니다.
         await this.sessionService.addConversation(
-          sessionId, 'function', JSON.stringify({ type: 'action_result', content: processedResult, success })
+          sessionId, 'function', JSON.stringify(result)
         );
         
+        // AI가 이해할 수 있는 { output: '...' } 형식으로 변환합니다.
+        const output = result.success
+            ? (result.stdout || result.content || 'Command executed successfully with no output.')
+            : `Error: ${result.stderr || result.error || 'Command failed with no error message.'}`;
+
         partsForAI.push({
           functionResponse: {
             name: tool_response.name,
-            response: { output: processedResult },
+            response: { output },
           },
         });
-        
-        // Add the function call that led to this result to the history for context
-        const lastTurn = history[history.length -1];
-        if (lastTurn?.role === 'model' && lastTurn.parts[0]?.functionCall) {
-          // It's already in the history from the parsing logic
-        } else {
-          // This case might need handling if the flow changes, for now it's okay.
-        }
       }
 
       const chat = this.getModelWithTools().startChat({
