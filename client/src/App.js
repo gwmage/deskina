@@ -361,23 +361,27 @@ const App = () => {
                     localStorage.setItem(`cwd_${newId}`, currentWorkingDirectory);
                 }
             } else if (data.type === 'text_chunk') {
-                setConversation(prev => {
+                const textChunk = data.payload;
+                for (const char of textChunk) {
+                  setConversation(prev => {
                     const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
                     if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
-                        // Correct, immutable update
-                        const updatedTurn = { ...lastTurn, content: lastTurn.content + data.payload };
-                        return [...prev.slice(0, -1), updatedTurn];
+                      const updatedTurn = { ...lastTurn, content: lastTurn.content + char };
+                      return [...prev.slice(0, -1), updatedTurn];
                     } else {
-                        // This is a new message turn
-                        const newTurn = { id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true };
-                        lastMessageId = newTurn.id;
-                        return [...prev, newTurn];
+                      const newTurn = { id: `model-${Date.now()}`, role: 'model', content: char, isStreaming: true };
+                      lastMessageId = newTurn.id;
+                      return [...prev, newTurn];
                     }
-                });
+                  });
+                  await new Promise(resolve => setTimeout(resolve, 10)); // Artificial delay for typewriter effect
+                }
             } else if (data.type === 'action') {
+                // Stop rendering the last message as streaming if we get a tool call
+                setConversation(prev => prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t)));
                 executeToolCall({ name: data.payload.name, id: `tool-call-${Date.now()}`, args: data.payload.args });
             } else if (data.type === 'final') {
-                // The stream is done, final cleanup is handled in the 'done' condition of the reader.
+                // Final message is handled by the 'done' condition
             }
           } catch (e) {
             console.error('Failed to parse JSON line:', jsonString, e);
