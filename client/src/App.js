@@ -331,7 +331,10 @@ const App = () => {
       const { done, value } = await reader.read();
       if (done) {
           setIsLoading(false);
-          setConversation(prev => prev.map(t => t.id === lastMessageId ? { ...t, isStreaming: false } : t));
+          setConversation(prev => {
+            if (!lastMessageId) return prev;
+            return prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t));
+          });
           break;
       }
 
@@ -359,17 +362,17 @@ const App = () => {
                 }
             } else if (data.type === 'text_chunk') {
                 setConversation(prev => {
-                    const newConv = [...prev];
-                    const lastTurn = newConv[newConv.length - 1];
-                    
+                    const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
                     if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
-                        lastTurn.content += data.payload;
+                        // Correct, immutable update
+                        const updatedTurn = { ...lastTurn, content: lastTurn.content + data.payload };
+                        return [...prev.slice(0, -1), updatedTurn];
                     } else {
+                        // This is a new message turn
                         const newTurn = { id: `model-${Date.now()}`, role: 'model', content: data.payload, isStreaming: true };
-                        newConv.push(newTurn);
                         lastMessageId = newTurn.id;
+                        return [...prev, newTurn];
                     }
-                    return newConv;
                 });
             } else if (data.type === 'action') {
                 executeToolCall({ name: data.payload.name, id: `tool-call-${Date.now()}`, args: data.payload.args });
