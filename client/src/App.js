@@ -63,9 +63,8 @@ const EditFileProposal = ({ proposal, onAccept, onReject }) => {
 };
 
 const AuthPage = ({ onLoginSuccess }) => {
-  // This component remains unchanged.
   const [isLogin, setIsLogin] = useState(true);
-  const [step, setStep] = useState(1); // For multi-step signup
+  const [step, setStep] = useState(1);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -294,7 +293,6 @@ const App = () => {
     let result;
     if (toolCall.name === 'runCommand') {
       result = await window.electronAPI.runCommand({ ...toolCall.args, cwd: currentWorkingDirectory });
-      // IMPORTANT: If cd command is successful, update CWD state and persist it
       if (result.success && result.newCwd) {
         setCurrentWorkingDirectory(result.newCwd);
         const sessionId = sessionIdRef.current;
@@ -302,6 +300,12 @@ const App = () => {
           localStorage.setItem(`cwd_${sessionId}`, result.newCwd);
         }
       }
+    } else if (toolCall.name === 'readFile') {
+        if (typeof toolCall.args.filePath !== 'string') {
+            result = { success: false, error: `Invalid filePath: Expected a string, but received ${typeof toolCall.args.filePath}. Please provide a valid file path.` };
+        } else {
+            result = await window.electronAPI.readFile({ filePath: toolCall.args.filePath, cwd: currentWorkingDirectory });
+        }
     } else if (toolCall.name === 'editFile') {
       setEditProposal({ ...toolCall.args, originalContent: 'loading' });
       try {
@@ -312,13 +316,27 @@ const App = () => {
       }
       return;
     } else {
-       // Placeholder for other tool calls
        result = { success: true, stdout: `Tool ${toolCall.name} executed.`};
     }
 
-    const resultTurn = { id: `result-${toolCall.id}`, role: 'system', type: 'action_result', content: result.stdout || result.stderr || result.error, success: result.success };
+    let uiContent;
+    if (toolCall.name === 'readFile') {
+        uiContent = result.success ? `Successfully read file: ${toolCall.args.filePath}` : `Failed to read file: ${result.error}`;
+    } else {
+        uiContent = result.stdout || result.stderr || result.error;
+    }
+
+    const resultTurn = { id: `result-${toolCall.id}`, role: 'system', type: 'action_result', content: uiContent, success: result.success };
     setConversation(prev => [...prev, resultTurn]);
-    await sendToolResult(toolCall.name, toolCall.id, result);
+    
+    let resultForAI;
+    if (toolCall.name === 'readFile') {
+        resultForAI = result.success ? { success: true, output: result.content } : result;
+    } else {
+        resultForAI = result;
+    }
+    
+    await sendToolResult(toolCall.name, toolCall.id, resultForAI);
   }
 
   async function processStream(response, sessionId) {
@@ -339,9 +357,8 @@ const App = () => {
       }
 
       buffer += decoder.decode(value, { stream: true });
-
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // Keep the potentially incomplete last line in buffer
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (line.trim().startsWith('data: ')) {
@@ -355,33 +372,34 @@ const App = () => {
                 const newId = data.payload;
                 if (sessionId === 'temp' || !sessionId) {
                     setCurrentSessionId(newId);
-                    // Update temp session in list with real ID
                     setSessions(prev => prev.map(s => (s.id === 'temp' ? { ...s, id: newId } : s)));
-                    // Persist CWD for the new session
-                    localStorage.setItem(`cwd_${newId}`, currentWorkingDirectory);
+                    const tempCwd = localStorage.getItem('cwd_temp');
+                    if (tempCwd) {
+                      localStorage.setItem(`cwd_${newId}`, tempCwd);
+                      localStorage.removeItem('cwd_temp');
+                    }
                 }
             } else if (data.type === 'text_chunk') {
-                const textChunk = data.payload;
-                for (const char of textChunk) {
-                  setConversation(prev => {
-                    const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
-                    if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
-                      const updatedTurn = { ...lastTurn, content: lastTurn.content + char };
-                      return [...prev.slice(0, -1), updatedTurn];
-                    } else {
-                      const newTurn = { id: `model-${Date.now()}`, role: 'model', content: char, isStreaming: true };
-                      lastMessageId = newTurn.id;
-                      return [...prev, newTurn];
-                    }
-                  });
-                  await new Promise(resolve => setTimeout(resolve, 10)); // Artificial delay for typewriter effect
-                }
+              const textChunk = data.payload;
+              for (const char of textChunk) {
+                setConversation(prev => {
+                  const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
+                  if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
+                    const updatedTurn = { ...lastTurn, content: lastTurn.content + char };
+                    return [...prev.slice(0, -1), updatedTurn];
+                  } else {
+                    const newTurn = { id: `model-${Date.now()}`, role: 'model', content: char, isStreaming: true };
+                    lastMessageId = newTurn.id;
+                    return [...prev, newTurn];
+                  }
+                });
+                await new Promise(resolve => setTimeout(resolve, 10));
+              }
             } else if (data.type === 'action') {
-                // Stop rendering the last message as streaming if we get a tool call
                 setConversation(prev => prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t)));
                 executeToolCall({ name: data.payload.name, id: `tool-call-${Date.now()}`, args: data.payload.args });
             } else if (data.type === 'final') {
-                // Final message is handled by the 'done' condition
+                // Done
             }
           } catch (e) {
             console.error('Failed to parse JSON line:', jsonString, e);
@@ -440,9 +458,20 @@ const App = () => {
 
   useEffect(() => {
     const lastMessage = conversation[conversation.length - 1];
-    if (lastMessage && lastMessage.id !== lastMessageId) {
-      scrollToBottom();
-      setLastMessageId(lastMessage.id);
+
+    // lastMessage could be undefined if conversation is empty.
+    if (!lastMessage) {
+      return;
+    }
+
+    // Always scroll to bottom if the last message is being streamed.
+    if (lastMessage.isStreaming) {
+        scrollToBottom();
+    } 
+    // Otherwise, scroll only when a new message (with a new ID) is added.
+    else if (lastMessage.id !== lastMessageId) {
+        scrollToBottom();
+        setLastMessageId(lastMessage.id);
     }
   }, [conversation, lastMessageId]);
 
@@ -487,12 +516,13 @@ const App = () => {
   
   const handleSessionClick = (sessionId) => {
     if (sessionId === currentSessionId) return;
-    isNewSessionRef.current = false; // Flag that we are switching to an existing session
+    isNewSessionRef.current = false;
     setCurrentSessionId(sessionId);
     const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
     if (defaultCwd) setCurrentWorkingDirectory(savedCwd || defaultCwd);
     setConversation([]);
     setHasMore(true);
+    setCurrentPage(1);
     focusAfterLoadingRef.current = true;
   };
 
@@ -505,9 +535,7 @@ const App = () => {
       const userMessage = input.trim();
       if (!userMessage && !imageBase64) return;
       
-      const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64 };
-      
-      let tempConversation = [...conversation, newTurn];
+      let tempConversation = [...conversation, { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64 }];
       let sessionIdToSend = currentSessionId;
 
       if (!sessionIdToSend) {
@@ -517,7 +545,6 @@ const App = () => {
         setSessions(prev => [newTempSession, ...prev]);
         setCurrentSessionId(newTempId);
         sessionIdToSend = newTempId;
-        // Save current CWD for the temp session
         localStorage.setItem(`cwd_${newTempId}`, currentWorkingDirectory);
       }
 
@@ -581,7 +608,6 @@ const App = () => {
   );
   
   const renderTurn = (turn, index) => {
-    // This function remains unchanged for now.
     let turnRoleClass = '';
     let turnContent = null;
 
@@ -643,9 +669,6 @@ const App = () => {
         </div>
       </main>
       <EditFileProposal proposal={editProposal} onAccept={() => {
-          // This needs to be implemented properly
-          console.log("Accepting edit", editProposal);
-          // Actually perform the edit
           window.electronAPI.editFile({ filePath: editProposal.filePath, newContent: editProposal.newContent })
               .then(result => {
                   if(result.success) {
@@ -653,7 +676,6 @@ const App = () => {
                       sendToolResult('editFile', `tool-edit-${Date.now()}`, { success: true, message: `File ${editProposal.filePath} has been updated.` });
                   } else {
                       console.error("Failed to save file:", result.error);
-                      // Optionally, inform the user of the failure within the chat
                       const errorTurn = { id: `result-edit-fail-${Date.now()}`, role: 'system', type: 'action_result', content: `Failed to save file: ${result.error}`, success: false };
                       setConversation(prev => [...prev, errorTurn]);
                   }

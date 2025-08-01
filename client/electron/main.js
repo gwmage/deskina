@@ -137,11 +137,15 @@ ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
   });
 });
 
-ipcMain.handle('readFile', async (event, filePath) => {
+ipcMain.handle('readFile', async (event, { filePath, cwd }) => {
   try {
-    const content = await fs.promises.readFile(filePath, 'utf-8');
+    const executionCwd = cwd || os.homedir();
+    const absolutePath = path.resolve(executionCwd, filePath);
+    console.log(`[Main] Attempting to read file at absolute path: ${absolutePath}`);
+    const content = await fs.promises.readFile(absolutePath, 'utf-8');
     return { success: true, content };
   } catch (error) {
+    console.error(`[Main] Failed to read file at ${filePath}. Error: ${error.message}`);
     return { success: false, error: error.message };
   }
 });
