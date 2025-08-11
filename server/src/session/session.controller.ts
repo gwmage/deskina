@@ -1,16 +1,20 @@
 import { Controller, Get, Param, Query, ParseIntPipe, DefaultValuePipe, UseGuards, Req, Request } from '@nestjs/common';
 import { SessionService } from './session.service';
-import { AuthGuard } from '@nestjs/passport';
+import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
 
 @Controller('sessions')
-@UseGuards(AuthGuard('jwt'))
+@UseGuards(JwtAuthGuard)
 export class SessionController {
   constructor(private readonly sessionService: SessionService) {}
 
   @Get()
-  async findAll(@Request() req) {
+  async findAll(
+    @Request() req,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ) {
     const userId = req.user.id;
-    return this.sessionService.findAllForUser(userId);
+    return this.sessionService.findAllForUser(userId, page, limit);
   }
 
   @Get(':id/conversations')

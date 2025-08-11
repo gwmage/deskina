@@ -132,9 +132,25 @@ body {
 }
 
 .sessions-list ul {
-  list-style-type: none;
+  list-style: none;
   padding: 0;
   margin: 0;
+}
+
+.load-more-sessions-button {
+  width: 100%;
+  padding: 10px;
+  background-color: var(--background-color-tertiary);
+  color: var(--text-color-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+
+.load-more-sessions-button:hover {
+  background-color: var(--border-color);
 }
 
 .sessions-list li {

@@ -201,12 +201,13 @@ const AuthPage = ({ onLoginSuccess }) => {
   );
 };
 
-const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation, onLogout, isSidebarOpen }) => (
+const Sidebar = ({ sessions, currentSessionId, onSessionClick, onNewConversation, onLogout, isSidebarOpen, onLoadMore, hasMore }) => (
   <aside className={`sidebar ${isSidebarOpen ? 'open' : 'closed'}`}>
     <div className="sidebar-content">
       <button onClick={onNewConversation} className="new-chat-button">+ New Chat</button>
       <nav className="sessions-list">
         <ul>{sessions.map((session) => (<li key={session.id} className={session.id === currentSessionId ? 'active' : ''} onClick={() => onSessionClick(session.id)}>{session.title || 'Untitled Conversation'}</li>))}</ul>
+        {hasMore && <button onClick={onLoadMore} className="load-more-sessions-button">Load More</button>}
       </nav>
       <div className="sidebar-footer">
         <button onClick={onLogout} className="logout-button"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg><span>Logout</span></button>
@@ -231,8 +232,10 @@ const App = () => {
   const [editProposal, setEditProposal] = useState(null);
   const [imageBase64, setImageBase64] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
+  const [conversationPage, setConversationPage] = useState(1);
+  const [hasMoreConversations, setHasMoreConversations] = useState(true);
+  const [sessionPage, setSessionPage] = useState(1);
+  const [hasMoreSessions, setHasMoreSessions] = useState(true);
   const [lastMessageId, setLastMessageId] = useState(null);
   const conversationRef = useRef(null);
   const abortControllerRef = useRef(null);
@@ -278,11 +281,11 @@ const App = () => {
       setCurrentWorkingDirectory(savedCwd || defaultCwd);
 
       setConversation(prev => concat ? [...formattedHistory, ...prev] : formattedHistory);
-      setHasMore(data.conversations.length > 0 && (page * 20 < data.total));
+      setHasMoreConversations(data.conversations.length > 0 && (page * 20 < data.total));
     } catch (error) {
       console.error('Failed to fetch history:', error);
       setConversation([]);
-      setHasMore(false);
+      setHasMoreConversations(false);
     } finally {
       setIsLoading(false);
     }
@@ -414,7 +417,7 @@ const App = () => {
     if (storedToken) {
       setToken(storedToken);
       setIsAuthenticated(true);
-      fetchSessions(storedToken);
+      fetchSessions(storedToken, 1);
       const lastSessionId = localStorage.getItem('currentSessionId');
       if (lastSessionId) setCurrentSessionId(lastSessionId);
     }
@@ -430,8 +433,8 @@ const App = () => {
   }, [currentSessionId, fetchSessionHistory]);
   
   useEffect(() => {
-    if (currentPage > 1) fetchSessionHistory(currentSessionId, currentPage, true);
-  }, [currentPage, currentSessionId, fetchSessionHistory]);
+    if (conversationPage > 1) fetchSessionHistory(currentSessionId, conversationPage, true);
+  }, [conversationPage, currentSessionId, fetchSessionHistory]);
 
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
@@ -454,14 +457,26 @@ const App = () => {
     }
   }, [conversation]);
 
-  const fetchSessions = async (authToken) => {
+  const fetchSessions = async (authToken, page = 1) => {
     try {
-      const response = await fetch(`${API_URL}/sessions`, { headers: { 'Authorization': `Bearer ${authToken}` } });
+      const response = await fetch(`${API_URL}/sessions?page=${page}&limit=20`, { headers: { 'Authorization': `Bearer ${authToken}` } });
       if (!response.ok) throw new Error('Failed to load sessions');
-      setSessions(await response.json());
+      const newSessions = await response.json();
+      setHasMoreSessions(newSessions.length > 0);
+      if (page === 1) {
+        setSessions(newSessions);
+      } else {
+        setSessions(prev => [...prev, ...newSessions]);
+      }
     } catch (error) {
       console.error("Error fetching sessions:", error);
     }
+  };
+
+  const handleLoadMoreSessions = () => {
+    const nextPage = sessionPage + 1;
+    setSessionPage(nextPage);
+    fetchSessions(token, nextPage);
   };
 
   const scrollToBottom = () => {
@@ -479,8 +494,8 @@ const App = () => {
     setInput('');
     setImageBase64(null);
     setImagePreview(null);
-    setHasMore(false);
-    setCurrentPage(1);
+    setHasMoreConversations(false);
+    setConversationPage(1);
     focusInput();
     isNewSessionRef.current = true;
   };
@@ -492,7 +507,8 @@ const App = () => {
     const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
     if (defaultCwd) setCurrentWorkingDirectory(savedCwd || defaultCwd);
     setConversation([]);
-    setHasMore(true);
+    setHasMoreConversations(true);
+    setConversationPage(1);
     focusAfterLoadingRef.current = true;
   };
 
@@ -552,9 +568,9 @@ const App = () => {
     }
   };
 
-  const handleLoadMore = () => {
+  const handleLoadMoreConversations = () => {
     if (conversationRef.current) prevScrollHeightRef.current = conversationRef.current.scrollHeight;
-    setCurrentPage(prev => prev + 1);
+    setConversationPage(prev => prev + 1);
   };
   
   const handleLogout = () => {
@@ -564,13 +580,15 @@ const App = () => {
     setConversation([]);
     setSessions([]);
     setCurrentSessionId(null);
+    setSessionPage(1);
+    setHasMoreSessions(true);
   };
 
   const handleLoginSuccess = (token) => {
     localStorage.setItem('accessToken', token);
     setToken(token);
     setIsAuthenticated(true);
-    fetchSessions(token);
+    fetchSessions(token, 1);
   };
 
   const renderWelcomeScreen = () => (
@@ -617,7 +635,16 @@ const App = () => {
 
   return (
     <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
-      <Sidebar sessions={sessions} currentSessionId={currentSessionId} onSessionClick={handleSessionClick} onNewConversation={handleNewConversation} onLogout={handleLogout} isSidebarOpen={isSidebarOpen} />
+      <Sidebar 
+        sessions={sessions} 
+        currentSessionId={currentSessionId} 
+        onSessionClick={handleSessionClick} 
+        onNewConversation={handleNewConversation} 
+        onLogout={handleLogout} 
+        isSidebarOpen={isSidebarOpen}
+        onLoadMore={handleLoadMoreSessions}
+        hasMore={hasMoreSessions}
+      />
       <main className="chat-container">
         <header className="chat-header">
           <button className="sidebar-toggle-button" onClick={() => setIsSidebarOpen(!isSidebarOpen)}><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
@@ -628,7 +655,7 @@ const App = () => {
         </header>
         <div className="conversation" ref={conversationRef}>
           {conversation.length === 0 && !isLoading && renderWelcomeScreen()}
-          {hasMore && <div className="load-more-container"><button onClick={handleLoadMore} disabled={isLoading}>Load More Conversations</button></div>}
+          {hasMoreConversations && <div className="load-more-container"><button onClick={handleLoadMoreConversations} disabled={isLoading}>Load More Conversations</button></div>}
           {visibleConversation.map((turn, index) => renderTurn(turn, index))}
           {isLoading && !isCurrentlyStreaming && <div className="turn assistant"><div className="turn-content"><div className="loading-dots"><span></span><span></span><span></span></div></div></div>}
         </div>

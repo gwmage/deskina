@@ -22,10 +22,13 @@ export class SessionService {
     });
   }
 
-  async findAllForUser(userId: string) {
+  async findAllForUser(userId: string, page: number, limit: number) {
+    const skip = (page - 1) * limit;
     return this.prisma.session.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
+      skip: skip,
+      take: limit,
     });
   }
 
