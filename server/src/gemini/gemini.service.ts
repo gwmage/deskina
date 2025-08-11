@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma.service';
 import { SessionService } from '../session/session.service';
 import { ScriptsService } from '../scripts/scripts.service';
 import { Response } from 'express';
+import { ConversationStreamDto } from './dto/conversation-stream.dto';
 
 const runCommandTool: FunctionDeclaration = {
   name: 'runCommand',
@@ -207,13 +208,16 @@ ${examples}
 
     if (functionCalls && functionCalls.length > 0) {
       // 함수 호출이 있으면, DB에 저장하고 클라이언트에 'action' 이벤트를 보냅니다.
-      const call = functionCalls[0];
-       await this.sessionService.addConversation(
+      // 여러 개의 함수 호출을 모두 처리하도록 수정합니다.
+      await this.sessionService.addConversation(
         sessionId,
         'model',
-        JSON.stringify({ functionCall: call }),
-       );
-       res.write(`data: ${JSON.stringify({ type: 'action', payload: call })}\n\n`);
+        JSON.stringify({ functionCalls: functionCalls }), // DB에는 전체 배열 저장
+      );
+      
+      for (const call of functionCalls) {
+        res.write(`data: ${JSON.stringify({ type: 'action', payload: call })}\n\n`);
+      }
 
     } else if (fullResponseText.trim()) {
       // 텍스트 응답만 있었을 경우, DB에 저장합니다.
@@ -233,17 +237,16 @@ ${examples}
 
   async generateResponse(
     userId: string,
-    body: {
-      sessionId?: string;
-      message?: string;
-      platform?: string;
-      imageBase64?: string;
-      currentWorkingDirectory?: string;
-      tool_response?: { name: string; id: string; result: any };
-    },
+    body: ConversationStreamDto,
     res: Response,
   ) {
-    const { message, platform, imageBase64, tool_response, currentWorkingDirectory } = body;
+    const {
+      message,
+      platform,
+      imageBase64,
+      tool_responses,
+      currentWorkingDirectory,
+    } = body;
     let { sessionId } = body;
 
     try {
@@ -308,30 +311,45 @@ ${examples}
       let partsForAI: Part[] = [];
 
       if (message) {
-        await this.sessionService.addConversation(sessionId, 'user', message, imageBase64);
+        await this.sessionService.addConversation(
+          sessionId,
+          'user',
+          message,
+          imageBase64,
+        );
         partsForAI.push({ text: message });
         if (imageBase64) {
           partsForAI.push(this.convertBase64ToPart(imageBase64, 'image/png'));
         }
-      } else if (tool_response) {
-        const result = tool_response.result;
-        
-        // 클라이언트가 보낸 원본 결과 객체를 DB에 저장합니다.
-        await this.sessionService.addConversation(
-          sessionId, 'function', JSON.stringify(result)
-        );
-        
-        // AI가 이해할 수 있는 { output: '...' } 형식으로 변환합니다.
-        const output = result.success
-            ? (result.stdout || result.content || 'Command executed successfully with no output.')
-            : `Error: ${result.stderr || result.error || 'Command failed with no error message.'}`;
+      } else if (tool_responses && tool_responses.length > 0) {
+        for (const tool_response of tool_responses) {
+          const result = tool_response.result;
 
-        partsForAI.push({
-          functionResponse: {
-            name: tool_response.name,
-            response: { output },
-          },
-        });
+          // 클라이언트가 보낸 원본 결과 객체를 DB에 저장합니다.
+          await this.sessionService.addConversation(
+            sessionId,
+            'function',
+            JSON.stringify(result),
+          );
+
+          // AI가 이해할 수 있는 { output: '...' } 형식으로 변환합니다.
+          const output = result.success
+            ? result.stdout ||
+              result.content ||
+              'Command executed successfully with no output.'
+            : `Error: ${
+                result.stderr ||
+                result.error ||
+                'Command failed with no error message.'
+              }`;
+
+          partsForAI.push({
+            functionResponse: {
+              name: tool_response.name,
+              response: { output },
+            },
+          });
+        }
       }
 
       const chat = this.getModelWithTools().startChat({

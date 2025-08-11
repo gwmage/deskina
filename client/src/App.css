@@ -729,6 +729,18 @@ body {
   word-break: break-all; /* Break long words or paths */
 }
 
+.turn.system.action-result {
+  padding: 0;
+  background-color: transparent;
+}
+
+.turn.system.action-executing {
+  background-color: var(--background-color-secondary);
+  padding: 12px 20px;
+  border-radius: var(--border-radius);
+  margin: 4px 0;
+}
+
 
 /* --- Edit File Proposal Modal --- */
 .edit-proposal-overlay {

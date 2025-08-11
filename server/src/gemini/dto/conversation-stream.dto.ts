@@ -1,14 +1,10 @@
 import { IsOptional, IsString } from 'class-validator';
 
 export class ConversationStreamDto {
-  @IsString()
-  message: string;
-
-  @IsOptional()
-  @IsString()
   sessionId?: string;
-
-  @IsOptional()
-  @IsString()
+  message?: string;
+  platform?: string;
   imageBase64?: string;
+  currentWorkingDirectory?: string;
+  tool_responses?: { name: string; result: any }[];
 } 

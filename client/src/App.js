@@ -237,6 +237,7 @@ const App = () => {
   const [sessionPage, setSessionPage] = useState(1);
   const [hasMoreSessions, setHasMoreSessions] = useState(true);
   const [lastMessageId, setLastMessageId] = useState(null);
+  const toolCallsToExecuteRef = useRef([]);
   const conversationRef = useRef(null);
   const abortControllerRef = useRef(null);
   const prevScrollHeightRef = useRef(null);
@@ -292,12 +293,22 @@ const App = () => {
   }, [token, defaultCwd]);
 
   async function executeToolCall(toolCall) {
-    if (!toolCall || !toolCall.name) return;
-    
+    if (!toolCall || !toolCall.name) return null; // Return null on failure
+
     let result;
+    const toolCallId = `tool-call-${Date.now()}`;
+    
+    // Display the executing tool in the UI
+    const executingTurn = {
+      id: `executing-${toolCallId}`,
+      role: 'system',
+      type: 'action_executing', 
+      content: `⚡️ **${toolCall.name}**\n\`\`\`json\n${JSON.stringify(toolCall.args, null, 2)}\n\`\`\``,
+    };
+    setConversation(prev => [...prev, executingTurn]);
+
     if (toolCall.name === 'runCommand') {
       result = await window.electronAPI.runCommand({ ...toolCall.args, cwd: currentWorkingDirectory });
-      // IMPORTANT: If cd command is successful, update CWD state and persist it
       if (result.success && result.newCwd) {
         setCurrentWorkingDirectory(result.newCwd);
         const sessionId = sessionIdRef.current;
@@ -305,39 +316,84 @@ const App = () => {
           localStorage.setItem(`cwd_${sessionId}`, result.newCwd);
         }
       }
+    } else if (toolCall.name === 'readFile') {
+        if (typeof toolCall.args.filePath !== 'string') {
+            result = { success: false, error: `Invalid filePath: Expected a string, but received ${typeof toolCall.args.filePath}. Please provide a valid file path.` };
+        } else {
+            result = await window.electronAPI.readFile({ filePath: toolCall.args.filePath, cwd: currentWorkingDirectory });
+        }
     } else if (toolCall.name === 'editFile') {
-      setEditProposal({ ...toolCall.args, originalContent: 'loading' });
+      // editFile is handled via proposal UI, not direct execution here
+      setEditProposal({ ...toolCall.args, originalContent: 'loading', toolCallId: toolCallId });
       try {
           const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
           setEditProposal(prev => ({ ...prev, originalContent: originalContent.content }));
       } catch (e) {
           setEditProposal(prev => ({ ...prev, originalContent: `Error loading file: ${e.message}`}));
       }
-      return;
+      // Since this is asynchronous and requires user interaction, we return a promise
+      // that resolves when the user acts. For now, we'll handle the result sending in the proposal's accept/reject handlers.
+      return null; 
     } else {
-       // Placeholder for other tool calls
        result = { success: true, stdout: `Tool ${toolCall.name} executed.`};
     }
 
-    const resultTurn = { id: `result-${toolCall.id}`, role: 'system', type: 'action_result', content: result.stdout || result.stderr || result.error, success: result.success };
+    const uiContent = result.stdout || result.stderr || result.error || (result.success ? `Tool ${toolCall.name} completed.` : `Tool ${toolCall.name} failed.`);
+    const resultTurn = { id: `result-${toolCallId}`, role: 'system', type: 'action_result', content: uiContent, success: result.success };
     setConversation(prev => [...prev, resultTurn]);
-    await sendToolResult(toolCall.name, toolCall.id, result);
+
+    // Return a structured result for batch sending
+    return {
+      toolCall,
+      result
+    };
   }
+  
+  async function executeAndProcessAllTools(toolCalls) {
+      if (!toolCalls || toolCalls.length === 0) {
+          setIsLoading(false);
+          return;
+      }
+      
+      const results = [];
+      for (const toolCall of toolCalls) {
+          const res = await executeToolCall(toolCall);
+          if(res) { // executeToolCall might return null for proposals
+            results.push(res);
+          }
+      }
+      
+      if(results.length > 0) {
+        await sendToolResults(results);
+      }
+  }
+
 
   async function processStream(response, sessionId) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let lastMessageId = null; 
+    let lastMessageId = null;
+    toolCallsToExecuteRef.current = []; // Reset batch for new stream
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-          setIsLoading(false);
+          // Only set loading to false if there are no more actions to take.
+          // Otherwise, the loading state will be handled by the tool execution flow.
+          if (toolCallsToExecuteRef.current.length === 0) {
+            setIsLoading(false);
+          }
+
           setConversation(prev => {
             if (!lastMessageId) return prev;
             return prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t));
           });
+          
+          // Stream is done, now execute all collected tool calls
+          if (toolCallsToExecuteRef.current.length > 0) {
+              executeAndProcessAllTools(toolCallsToExecuteRef.current);
+          }
           break;
       }
 
@@ -358,31 +414,25 @@ const App = () => {
                 const newId = data.payload;
                 if (sessionId === 'temp' || !sessionId) {
                     setCurrentSessionId(newId);
-                    // Update temp session in list with real ID
                     setSessions(prev => prev.map(s => (s.id === 'temp' ? { ...s, id: newId } : s)));
-                    // Persist CWD for the new session
                     localStorage.setItem(`cwd_${newId}`, currentWorkingDirectory);
                 }
             } else if (data.type === 'text_chunk') {
                 const textChunk = data.payload;
-                for (const char of textChunk) {
-                  setConversation(prev => {
-                    const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
-                    if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
-                      const updatedTurn = { ...lastTurn, content: lastTurn.content + char };
-                      return [...prev.slice(0, -1), updatedTurn];
-                    } else {
-                      const newTurn = { id: `model-${Date.now()}`, role: 'model', content: char, isStreaming: true };
-                      lastMessageId = newTurn.id;
-                      return [...prev, newTurn];
-                    }
-                  });
-                  await new Promise(resolve => setTimeout(resolve, 10)); // Artificial delay for typewriter effect
-                }
+                setConversation(prev => {
+                  const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
+                  if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
+                    const updatedTurn = { ...lastTurn, content: lastTurn.content + textChunk };
+                    return [...prev.slice(0, -1), updatedTurn];
+                  } else {
+                    const newTurn = { id: `model-${Date.now()}`, role: 'model', content: textChunk, isStreaming: true };
+                    lastMessageId = newTurn.id;
+                    return [...prev, newTurn];
+                  }
+                });
             } else if (data.type === 'action') {
-                // Stop rendering the last message as streaming if we get a tool call
                 setConversation(prev => prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t)));
-                executeToolCall({ name: data.payload.name, id: `tool-call-${Date.now()}`, args: data.payload.args });
+                toolCallsToExecuteRef.current.push(data.payload); // Add to batch
             } else if (data.type === 'final') {
                 // Final message is handled by the 'done' condition
             }
@@ -394,20 +444,32 @@ const App = () => {
     }
   }
 
-  async function sendToolResult(toolName, toolCallId, output) {
+  async function sendToolResults(results) {
     const sessionId = sessionIdRef.current;
-    if (!sessionId) return;
+    if (!sessionId || results.length === 0) return;
+    
     setIsLoading(true);
+    
+    const tool_responses = results.map(({ toolCall, result }) => ({
+      name: toolCall.name,
+      result: result
+    }));
+    
     try {
       const response = await fetch(`${API_URL}/gemini/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ sessionId, platform: window.navigator.platform, currentWorkingDirectory, tool_response: { name: toolName, id: toolCallId, result: output } }),
+        body: JSON.stringify({ 
+            sessionId, 
+            platform: window.navigator.platform, 
+            currentWorkingDirectory, 
+            tool_responses // Plural
+        }),
       });
-      if (!response.ok) throw new Error('Failed to send tool result');
+      if (!response.ok) throw new Error('Failed to send tool results');
       await processStream(response, sessionId);
     } catch (error) {
-      console.error('Tool result submission failed:', error);
+      console.error('Tool results submission failed:', error);
       setIsLoading(false);
     }
   }
@@ -616,6 +678,9 @@ const App = () => {
         if (turn.type === 'action_result') {
           turnRoleClass = 'system action-result';
           turnContent = <CommandResult success={turn.success} content={turn.content} />;
+        } else if (turn.type === 'action_executing') {
+          turnRoleClass = 'system action-executing';
+          turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         } else {
           turnRoleClass = 'system';
           turnContent = <div className="turn-content">{turn.content}</div>;
@@ -672,22 +737,20 @@ const App = () => {
       <EditFileProposal proposal={editProposal} onAccept={() => {
           // This needs to be implemented properly
           console.log("Accepting edit", editProposal);
-          // Actually perform the edit
           window.electronAPI.editFile({ filePath: editProposal.filePath, newContent: editProposal.newContent })
               .then(result => {
                   if(result.success) {
                       console.log("File saved successfully");
-                      sendToolResult('editFile', `tool-edit-${Date.now()}`, { success: true, message: `File ${editProposal.filePath} has been updated.` });
+                      sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: true, message: `File ${editProposal.filePath} has been updated.` } }]);
                   } else {
                       console.error("Failed to save file:", result.error);
-                      // Optionally, inform the user of the failure within the chat
                       const errorTurn = { id: `result-edit-fail-${Date.now()}`, role: 'system', type: 'action_result', content: `Failed to save file: ${result.error}`, success: false };
                       setConversation(prev => [...prev, errorTurn]);
                   }
               });
           setEditProposal(null);
       }} onReject={() => {
-          sendToolResult('editFile', `tool-edit-${Date.now()}`, { success: false, message: 'User rejected the file edit proposal.' });
+          sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: false, message: 'User rejected the file edit proposal.' } }]);
           setEditProposal(null);
       }} />
     </div>
