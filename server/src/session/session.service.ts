@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Part } from '@google/generative-ai';
 import { PrismaService } from '../prisma.service';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class SessionService {
@@ -34,16 +35,17 @@ export class SessionService {
 
   async addConversation(
     sessionId: string,
-    role: 'user' | 'model' | 'tool' | 'function',
-    content: string,
-    imageBase64?: string | null,
+    role: 'user' | 'model' | 'function',
+    parts: Part[],
   ) {
+    // The 'parts' array can contain complex objects, which Prisma expects as JsonValue
+    const partsAsJson = parts as unknown as Prisma.JsonArray;
+    
     return this.prisma.conversation.create({
       data: {
         sessionId,
         role,
-        content,
-        imageBase64,
+        parts: partsAsJson,
       },
     });
   }
@@ -55,7 +57,7 @@ export class SessionService {
   ) {
     const history = await this.prisma.conversation.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'desc' }, // 'desc' 순서 유지
+      orderBy: { createdAt: 'desc' }, // Get history in reverse chronological order
       take: limit,
       skip: skip,
     });
@@ -70,66 +72,61 @@ export class SessionService {
 
       const turn = history[i];
 
+      // A 'function' role turn contains the results of function calls.
+      // It should be preceded by a 'model' role turn that made the calls.
       if (
-        (turn.role === 'tool' || turn.role === 'function') &&
+        turn.role === 'function' &&
         i + 1 < history.length &&
         history[i + 1].role === 'model'
       ) {
-        const toolTurn = turn;
-        const modelTurn = history[i + 1];
+        const functionResultTurn = turn;
+        const modelCallTurn = history[i + 1];
 
-        try {
-          const parsedModelContent = JSON.parse(modelTurn.content);
-          
-          // Check for the new `functionCall` structure
-          if (parsedModelContent.functionCall) {
-            const { name, args } = parsedModelContent.functionCall;
-            const toolResult = JSON.parse(toolTurn.content);
+        const functionCalls = (modelCallTurn.parts as unknown as Part[])?.filter(p => p.functionCall).map(p => p.functionCall);
+        const functionResponses = (functionResultTurn.parts as unknown as Part[])?.filter(p => p.functionResponse).map(p => p.functionResponse);
 
-            if (toolResult) {
-              let commandStr = '';
-              if (name === 'runCommand') {
-                commandStr = `${args.command} ${(args.args || []).join(' ')}`;
-              } else if (name === 'runScript') {
-                commandStr = `python ${args.name}`;
-              } else if (name === 'readFile') {
-                commandStr = `${args.filePath}`;
-              }
-              
-              // desc 순서 유지를 위해 result를 먼저 push
-              clientHistory.push({
-                ...toolTurn,
-                id: toolTurn.id + '-result',
-                role: 'system',
-                type: 'action_result',
-                content: toolResult.success
-                  ? (toolResult.stdout || toolResult.content || 'Execution successful with no output.')
-                  : (toolResult.stderr || toolResult.error || 'Execution failed.'),
-                success: toolResult.success,
-              });
+        if (functionCalls && functionResponses && functionCalls.length > 0 && functionCalls.length === functionResponses.length) {
+            // Iterate backwards through the calls/responses because the history is DESC.
+            // This adds them to clientHistory in chronological order for that pair.
+            for (let j = functionCalls.length - 1; j >= 0; j--) {
+                const call = functionCalls[j];
+                const response = functionResponses[j];
 
-              clientHistory.push({
-                ...modelTurn,
-                id: modelTurn.id + '-action',
-                role: 'system',
-                type: 'action',
-                content: `> **${name}**: \`${commandStr}\``,
-              });
+                if (!call || !response) continue;
 
-              processedIndices.add(i);
-              processedIndices.add(i + 1);
-              continue; // 이 두 턴은 처리되었으므로 건너뜁니다.
+                const resultOutput = (response.response as { output?: string })?.output ?? 'No output.';
+                const success = !String(resultOutput).startsWith('Error:');
+                
+                // Add the result display first
+                clientHistory.push({
+                    id: `${functionResultTurn.id}-result-${j}`,
+                    role: 'system',
+                    type: 'action_result',
+                    content: resultOutput,
+                    success: success,
+                });
+
+                // Then add the call display
+                clientHistory.push({
+                    id: `${modelCallTurn.id}-action-${j}`,
+                    role: 'system',
+                    type: 'action_executing',
+                    content: `⚡️ **${call.name}**\n\`\`\`json\n${JSON.stringify(call.args, null, 2)}\n\`\`\``,
+                });
             }
-          }
-        } catch (e) {
-          this.logger.warn(`Failed to process action/result pair for client: ${e}`);
+          
+            processedIndices.add(i);
+            processedIndices.add(i + 1);
+            continue; // Skip the raw 'function' and 'model' turns
         }
       }
-
-      clientHistory.push(turn);
+      
+      // Only add user turns or model turns that are simple text responses.
+      if (turn.role === 'user' || (turn.role === 'model' && !(turn.parts as unknown as Part[])?.some(p => p.functionCall))) {
+          clientHistory.push(turn);
+      }
     }
-    // desc 순서의 배열을 그대로 반환합니다.
-    return clientHistory;
+    return clientHistory; // The client expects DESC order and will reverse it.
   }
 
   async countConversations(sessionId: string): Promise<number> {
@@ -147,57 +144,23 @@ export class SessionService {
 
     const apiHistory: { role: 'user' | 'model' | 'function'; parts: Part[] }[] = [];
 
-    for (let i = 0; i < dbHistory.length; i++) {
-      const turn = dbHistory[i];
-      const parts: Part[] = [];
-
-      if (turn.role === 'user') {
+    for (const turn of dbHistory) {
+      // The 'parts' column is Json?. It can be null for older data.
+      if (turn.parts && Array.isArray(turn.parts)) {
+        // Cast via 'unknown' to satisfy TypeScript's strictness.
+        const parts = turn.parts as unknown as Part[];
+        apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts });
+      } else {
+        // Handle legacy data where 'parts' is null and we rely on 'content'.
+        const legacyParts: Part[] = [];
         if (turn.content) {
-          parts.push({ text: turn.content });
+          legacyParts.push({ text: turn.content });
         }
         if (turn.imageBase64) {
-          parts.push({ inlineData: { mimeType: 'image/png', data: turn.imageBase64 } });
+          legacyParts.push({ inlineData: { mimeType: 'image/png', data: turn.imageBase64 } });
         }
-        apiHistory.push({ role: 'user', parts });
-
-      } else if (turn.role === 'model') {
-        try {
-          const parsed = JSON.parse(turn.content);
-          // `functionCall` 객체 구조를 우선적으로 확인합니다.
-          if (parsed.functionCall) {
-            parts.push({ functionCall: parsed.functionCall });
-          // 레거시 `action`/`parameters` 형식을 지원합니다.
-          } else if (parsed.action && parsed.parameters) {
-            parts.push({ functionCall: { name: parsed.action, args: parsed.parameters } });
-          } else {
-            parts.push({ text: turn.content });
-          }
-        } catch (e) {
-          parts.push({ text: turn.content });
-        }
-        apiHistory.push({ role: 'model', parts });
-
-      } else if (turn.role === 'function' || turn.role === 'tool') { // 'tool' 레거시 지원
-        // 함수/툴 응답은 항상 모델의 함수 호출 뒤에 옵니다.
-        const modelTurn = apiHistory[apiHistory.length - 1];
-        if (modelTurn && modelTurn.role === 'model' && modelTurn.parts[0]?.functionCall) {
-          try {
-            const toolResultObject = JSON.parse(turn.content);
-            // 저장된 결과 객체를 AI가 기대하는 { output: '...' } 형식으로 변환합니다.
-            const output = toolResultObject.success
-              ? (toolResultObject.stdout || toolResultObject.content || 'Command executed successfully with no output.')
-              : `Error: ${toolResultObject.stderr || toolResultObject.error || 'Command failed with no error message.'}`;
-
-            parts.push({
-              functionResponse: {
-                name: modelTurn.parts[0].functionCall.name,
-                response: { output },
-              },
-            });
-            apiHistory.push({ role: 'function', parts });
-          } catch(e) {
-             this.logger.error(`Failed to parse tool content from DB for turn ${turn.id}`, e);
-          }
+        if (legacyParts.length > 0) {
+          apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts: legacyParts });
         }
       }
     }

@@ -308,8 +308,10 @@ const App = () => {
     setConversation(prev => [...prev, executingTurn]);
 
     if (toolCall.name === 'runCommand') {
+      // It's crucial to await here to ensure CWD is updated before the next command
       result = await window.electronAPI.runCommand({ ...toolCall.args, cwd: currentWorkingDirectory });
       if (result.success && result.newCwd) {
+        // Use a functional update to ensure we're using the latest state
         setCurrentWorkingDirectory(result.newCwd);
         const sessionId = sessionIdRef.current;
         if (sessionId) {
@@ -326,13 +328,15 @@ const App = () => {
       // editFile is handled via proposal UI, not direct execution here
       setEditProposal({ ...toolCall.args, originalContent: 'loading', toolCallId: toolCallId });
       try {
-          const originalContent = await window.electronAPI.readFile(toolCall.args.filePath);
-          setEditProposal(prev => ({ ...prev, originalContent: originalContent.content }));
+          const originalContentResult = await window.electronAPI.readFile({filePath: toolCall.args.filePath, cwd: currentWorkingDirectory});
+          if (originalContentResult.success) {
+            setEditProposal(prev => ({ ...prev, originalContent: originalContentResult.content }));
+          } else {
+            setEditProposal(prev => ({ ...prev, originalContent: `Error loading file: ${originalContentResult.error}`}));
+          }
       } catch (e) {
           setEditProposal(prev => ({ ...prev, originalContent: `Error loading file: ${e.message}`}));
       }
-      // Since this is asynchronous and requires user interaction, we return a promise
-      // that resolves when the user acts. For now, we'll handle the result sending in the proposal's accept/reject handlers.
       return null; 
     } else {
        result = { success: true, stdout: `Tool ${toolCall.name} executed.`};
@@ -340,6 +344,8 @@ const App = () => {
 
     const uiContent = result.stdout || result.stderr || result.error || (result.success ? `Tool ${toolCall.name} completed.` : `Tool ${toolCall.name} failed.`);
     const resultTurn = { id: `result-${toolCallId}`, role: 'system', type: 'action_result', content: uiContent, success: result.success };
+    
+    // Use a functional update to avoid race conditions with conversation state
     setConversation(prev => [...prev, resultTurn]);
 
     // Return a structured result for batch sending
@@ -355,16 +361,19 @@ const App = () => {
           return;
       }
       
-      const results = [];
+      const allResults = [];
+      // Use a sequential for...of loop to ensure commands like 'cd' complete
+      // before the next command runs.
       for (const toolCall of toolCalls) {
           const res = await executeToolCall(toolCall);
           if(res) { // executeToolCall might return null for proposals
-            results.push(res);
+            allResults.push(res);
           }
       }
       
-      if(results.length > 0) {
-        await sendToolResults(results);
+      // After all tools have been executed sequentially, send all results back in one batch.
+      if(allResults.length > 0) {
+        await sendToolResults(allResults);
       }
   }
 
@@ -373,31 +382,38 @@ const App = () => {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let lastMessageId = null;
-    toolCallsToExecuteRef.current = []; // Reset batch for new stream
+    let currentLastMessageId = null; // Use a local var for the current stream
+    toolCallsToExecuteRef.current = []; // Reset for new stream
 
     while (true) {
-      const { done, value } = await reader.read();
+      const {
+        done,
+        value
+      } = await reader.read();
       if (done) {
-          // Only set loading to false if there are no more actions to take.
-          // Otherwise, the loading state will be handled by the tool execution flow.
-          if (toolCallsToExecuteRef.current.length === 0) {
-            setIsLoading(false);
-          }
+        // Only set loading to false if there are no more actions to take.
+        // Otherwise, the loading state will be handled by the tool execution flow.
+        if (toolCallsToExecuteRef.current.length === 0) {
+          setIsLoading(false);
+        }
 
-          setConversation(prev => {
-            if (!lastMessageId) return prev;
-            return prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t));
-          });
-          
-          // Stream is done, now execute all collected tool calls
-          if (toolCallsToExecuteRef.current.length > 0) {
-              executeAndProcessAllTools(toolCallsToExecuteRef.current);
-          }
-          break;
+        setConversation(prev => {
+          if (!currentLastMessageId) return prev;
+          return prev.map(t => (t.id === currentLastMessageId ? { ...t,
+            isStreaming: false
+          } : t));
+        });
+        
+        // Stream is done, now execute all collected tool calls
+        if (toolCallsToExecuteRef.current.length > 0) {
+            executeAndProcessAllTools(toolCallsToExecuteRef.current); // Pass state here
+        }
+        break;
       }
 
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, {
+        stream: true
+      });
 
       const lines = buffer.split('\n');
       buffer = lines.pop(); // Keep the potentially incomplete last line in buffer
@@ -421,18 +437,20 @@ const App = () => {
                 const textChunk = data.payload;
                 setConversation(prev => {
                   const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
-                  if (lastTurn && lastTurn.id === lastMessageId && lastTurn.role === 'model') {
+                  if (lastTurn && lastTurn.id === currentLastMessageId && lastTurn.role === 'model') {
                     const updatedTurn = { ...lastTurn, content: lastTurn.content + textChunk };
                     return [...prev.slice(0, -1), updatedTurn];
                   } else {
                     const newTurn = { id: `model-${Date.now()}`, role: 'model', content: textChunk, isStreaming: true };
-                    lastMessageId = newTurn.id;
+                    currentLastMessageId = newTurn.id;
                     return [...prev, newTurn];
                   }
                 });
             } else if (data.type === 'action') {
-                setConversation(prev => prev.map(t => (t.id === lastMessageId ? { ...t, isStreaming: false } : t)));
-                toolCallsToExecuteRef.current.push(data.payload); // Add to batch
+                setConversation(prev => prev.map(t => (t.id === currentLastMessageId ? { ...t,
+                  isStreaming: false
+                } : t)));
+                toolCallsToExecuteRef.current.push(data.payload);
             } else if (data.type === 'final') {
                 // Final message is handled by the 'done' condition
             }
@@ -444,13 +462,16 @@ const App = () => {
     }
   }
 
-  async function sendToolResults(results) {
+  async function sendToolResults(results) { // 6. Receive functionCalls
     const sessionId = sessionIdRef.current;
     if (!sessionId || results.length === 0) return;
     
     setIsLoading(true);
     
-    const tool_responses = results.map(({ toolCall, result }) => ({
+    const tool_responses = results.map(({
+      toolCall,
+      result
+    }) => ({
       name: toolCall.name,
       result: result
     }));
@@ -458,12 +479,15 @@ const App = () => {
     try {
       const response = await fetch(`${API_URL}/gemini/generate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ 
-            sessionId, 
-            platform: window.navigator.platform, 
-            currentWorkingDirectory, 
-            tool_responses // Plural
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          sessionId,
+          platform: window.navigator.platform,
+          currentWorkingDirectory,
+          tool_responses,
         }),
       });
       if (!response.ok) throw new Error('Failed to send tool results');
@@ -583,7 +607,12 @@ const App = () => {
       const userMessage = input.trim();
       if (!userMessage && !imageBase64) return;
       
-      const newTurn = { id: `user-${Date.now()}`, role: 'user', content: userMessage, imageBase64 };
+      const newTurn = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: userMessage,
+        imageBase64
+      };
       
       let tempConversation = [...conversation, newTurn];
       let sessionIdToSend = currentSessionId;

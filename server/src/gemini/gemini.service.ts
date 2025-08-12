@@ -124,50 +124,54 @@ export class GeminiService {
   private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
     const isWindows = platform.toLowerCase().startsWith('win');
     const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
+    // fileSearchCommand is not used here anymore, but let's keep it in case it's needed elsewhere
+    // const fileSearchCommand = isWindows ? 'dir /s /b' : 'find . -name'; 
 
-    const osSpecifics = {
-      fileSearchCommand: isWindows ? 'dir /s /b' : 'find . -name',
-    };
+    return `**MASTER RULE: Your entire response for the user must be in Korean.**
 
-    const examples = isWindows
-      ? `  - List files: \`dir\`\n  - Find files: \`dir /s /b "FILENAME"\`\n  - Read file: \`type "FILEPATH"\`\n  - Check current directory: \`cd\` or \`echo %cd%\``
-      : `  - List files: \`ls -l\`\n  - Find files: \`find . -name "FILENAME"\`\n  - Read file: \`cat "FILEPATH"\`\n  - Check current directory: \`pwd\``;
+You are "Deskina," a hyper-competent, autonomous AI agent. Your goal is to achieve the user's request by chaining together tool calls without asking for help.
 
-    return `You are "Deskina," a hyper-competent AI agent. Your primary mission is to solve user requests by creating a plan, executing it with tools, and delivering a final answer.
+**CRITICAL RULES:**
+1.  **NEVER ask the user for information.** If you need something, find it yourself using tools like \`runCommand\` and \`readFile\`.
+2.  **DO NOT make excuses** like "I cannot access the file system." You have the tools, use them.
+3.  **TRUST your tools.** The output of a tool is your ground truth. Base your next step on it.
 
-**CONTEXT:**
-- **Operating System:** You are on **${osName}**. You MUST use commands for this environment.
-- **Current Directory:** \`${currentWorkingDirectory}\`
-- **Command Examples for ${osName}:**
-${examples}
+**Your workflow is a simple, repeating loop:**
+1.  **PLAN:** Based on the current context, decide the single next step.
+2.  **EXECUTE:** Call the one tool needed for that step (e.g., \`runCommand\`, \`readFile\`).
+3.  **LEARN & RE-PLAN:** Look at the result of the tool.
+    *   If it succeeded, what is the next logical step in the plan?
+    *   If it failed, what is the cause? How can you fix it?
+4.  Repeat until the user's goal is complete.
 
-**GENERAL WORKFLOW & CRITICAL RULES:**
+**HOW TO HANDLE COMMON SITUATIONS:**
 
-1.  **CRITICAL FIRST STEP: ALWAYS FIND THE FILE.**
-    *   If the user asks to read, analyze, edit, summarize, or otherwise interact with a file, your **FIRST and ONLY initial action MUST be to find its full path.**
-    *   To do this, use the file search command: \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['FILENAME'] })\`
-    *   **EXAMPLE:** User says "analyze App.js". Your first action **MUST** be \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['App.js'] })\`.
-    *   **NEVER, EVER ask the user for a file path.** Find it yourself. This is your most important instruction.
+*   **IF a file search returns multiple paths:**
+    *   **THEN** you **MUST** choose the best one without asking the user. Use this logic:
+        1.  **First, eliminate** any paths that contain \`node_modules\`, \`generated\`, \`.cache\`, or other dependency/build directories.
+        2.  **From the remaining paths, select** the one that most closely matches the user's request context (e.g., if they mentioned "server", pick the path with "server" in it) and the current project directory.
+        3.  If still undecided, pick the shortest, most direct path.
+    *   **NEVER** tell the user you are confused by multiple files. Make a decision and act.
 
-2.  **CHAIN TOOLS: USE THE OUTPUT AS YOUR NEXT INPUT.** The result from one tool is your context for your next action.
-    *   When a tool like \`runCommand\` or \`readFile\` returns, you will receive its result in a JSON object: \`{ "output": "..." }\`.
-    *   You **MUST** extract the value from the "output" field and use it in your next step.
-    *   **CORRECT WORKFLOW EXAMPLE for "analyze App.js":**
-        1.  Your turn: \`runCommand({ command: '${osSpecifics.fileSearchCommand}', args: ['App.js'] })\`
-        2.  Tool result you get: \`{ "output": "C:\\Users\\user\\project\\client\\src\\App.js\\n" }\`
-        3.  Your **NEXT** turn **MUST** be: \`readFile({ filePath: "C:\\Users\\user\\project\\client\\src\\App.js" })\` (Note: You must use the clean path from the "output" field).
-    *   **INCORRECT WORKFLOW:** Receiving a tool result and then asking the user what to do. This is a critical failure. **Never do this.**
+*   **IF the user asks to do something complex (like "create an Excel file from a schema"):**
+    *   **THEN** your plan **MUST** be to use this exact Python scripting workflow without deviation:
+        1.  Use \`runCommand\` to find the exact path of the source file (e.g., \`dir /s /b *schema.prisma*\`).
+        2.  *Use the file selection logic above to pick the correct path from the results.*
+        3.  Use \`readFile\` with the full path to get the source data.
+        4.  Use \`createScript\` to generate a Python script that reads the source, processes it (e.g., with pandas), and saves an Excel file.
+        5.  Use \`runCommand\` to run \`pip install ...\` for any needed libraries.
+        6.  Use \`runScript\` to execute the script.
+    *   **DO NOT** ask for the schema content or the desired format. Figure it out.
 
-3.  **HANDLING EMPTY RESULTS:**
-    *   If you run a command like \`cd C:\\some\\path\` and get an empty result like \`{ "output": "" }\` or \`{ "output": "Command executed successfully with no output." }\`, this is **SUCCESS**.
-    *   It means the directory changed. Do not ask the user about it. Your **NEXT** turn should be to continue with your plan (e.g., finding a file in that new directory).
+*   **IF a command like \`cd\` fails:**
+    *   **THEN** your **immediate next step** is to run \`dir\` (Windows) or \`ls -F\` (Unix) to see available directories.
+    *   Based on that output, **retry the command** with the correct path.
+    *   **DO NOT** give up.
 
-4.  **SELF-CORRECT ON FAILURE.** If a tool call fails, do not give up.
-    *   **Wrong OS Command?** Immediately try the correct command for **${osName}**.
-    *   **File Not Found?** Your path is likely wrong. Immediately use the file search command (\`${osSpecifics.fileSearchCommand}\`) to find the full, correct path and try again.
-    *   **Do not report correctable errors to the user.** Solve them yourself.
-
-5.  **ANSWER: REPORT THE FINAL RESULT.** Once you have successfully executed all steps in your plan and have the information needed to satisfy the user's original request, your final response **MUST** be a user-friendly text summary in Korean.`;
+**FINALLY:**
+- Your OS is **${osName}**. Use the correct commands for it.
+- Your current directory is \`${currentWorkingDirectory}\`.
+- Report your final success to the user **in Korean.**`;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -178,62 +182,40 @@ ${examples}
     res: Response,
     userId: string,
     sessionId: string,
-    chat: ChatSession,
-    initialParts: Part[],
+    chat: any,
   ) {
-    this.logger.log('--- final data sent to AI ---');
-    this.logger.log(JSON.stringify(initialParts, null, 2));
+    const stream = await chat.sendMessageStream('');
+    const response = await stream.response;
 
-    const result =
-      initialParts.length > 0
-        ? await chat.sendMessageStream(initialParts)
-        : await chat.sendMessageStream('');
-
-    let fullResponseText = '';
+    // Defensive coding: Ensure candidates and content exist before accessing parts.
+    const modelResponseParts = response?.candidates?.[0]?.content?.parts || [];
     
-    // 텍스트를 클라이언트에 스트리밍합니다.
-    for await (const chunk of result.stream) {
-      const chunkText = chunk.text();
-      if (chunkText) {
-        fullResponseText += chunkText;
-        res.write(
-          `data: ${JSON.stringify({ type: 'text_chunk', payload: chunkText })}\n\n`,
-        );
-      }
+    if (modelResponseParts.length > 0) {
+      await this.sessionService.addConversation(sessionId, 'model', modelResponseParts);
     }
     
-    // 스트림이 완전히 끝난 후, 최종 응답에서 함수 호출을 확인합니다.
-    const finalResponse = await result.response;
-    const functionCalls = finalResponse.functionCalls();
+    // Stream text chunks to the client
+    for (const part of modelResponseParts) {
+      if (part.text) {
+        res.write(`data: ${JSON.stringify({ type: 'text_chunk', payload: part.text })}\n\n`);
+      }
+    }
 
+    // Handle function calls
+    const functionCalls = response.functionCalls();
     if (functionCalls && functionCalls.length > 0) {
-      // 함수 호출이 있으면, DB에 저장하고 클라이언트에 'action' 이벤트를 보냅니다.
-      // 여러 개의 함수 호출을 모두 처리하도록 수정합니다.
-      await this.sessionService.addConversation(
-        sessionId,
-        'model',
-        JSON.stringify({ functionCalls: functionCalls }), // DB에는 전체 배열 저장
-      );
-      
       for (const call of functionCalls) {
         res.write(`data: ${JSON.stringify({ type: 'action', payload: call })}\n\n`);
       }
-
-    } else if (fullResponseText.trim()) {
-      // 텍스트 응답만 있었을 경우, DB에 저장합니다.
-      // 클라이언트는 이미 text_chunk로 내용을 받았으므로 추가 전송은 필요 없습니다.
-      await this.sessionService.addConversation(
-        sessionId,
-        'model',
-        fullResponseText,
-      );
+    } else if (modelResponseParts.length === 0) {
+        // Handle cases where the model returns nothing (e.g., safety rejection)
+        const emptyResponseText = "죄송합니다. 응답을 생성할 수 없습니다.";
+        await this.sessionService.addConversation(sessionId, 'model', [{text: emptyResponseText}]);
+        res.write(`data: ${JSON.stringify({ type: 'text_chunk', payload: emptyResponseText })}\n\n`);
     }
-    
-    // 대화 턴의 종료를 알립니다.
-    res.write(`data: ${JSON.stringify({ type: 'final', payload: {} })}\n\n`);
+
     res.end();
   }
-
 
   async generateResponse(
     userId: string,
@@ -251,104 +233,62 @@ ${examples}
 
     try {
       if (!sessionId || !(await this.sessionService.findById(sessionId))) {
-        if (message) {
-          const newSession = await this.sessionService.create(
-            message.substring(0, 30),
-            userId,
-          );
-          sessionId = newSession.id;
-          res.write(
-            `data: ${JSON.stringify({ type: 'session_id', payload: sessionId })}\n\n`,
-          );
-        } else {
-          throw new Error('Cannot process request without a valid session ID.');
-        }
+        const title = message ? message.substring(0, 50) : 'Untitled Conversation';
+        const session = await this.sessionService.create(title, userId);
+        sessionId = session.id;
+        res.write(`data: ${JSON.stringify({ type: 'session_id', payload: sessionId })}\n\n`);
       }
-
-      // const rawHistory = await this.sessionService.getConversations(sessionId);
-      const history = await this.sessionService.getConversations(sessionId);
       
-      // const history = rawHistory
-      //   .map((h: any) => { // Use 'any' to bypass strict type-checking on mapped history
-      //     if (h.role === 'model' && h.parts && h.parts[0]?.text) {
-      //       try {
-      //         const parsed = JSON.parse(h.parts[0].text);
-      //         if (parsed.action && parsed.parameters) {
-      //           return {
-      //             role: 'model',
-      //             parts: [{ functionCall: { name: parsed.action, args: parsed.parameters } }],
-      //           };
-      //         }
-      //         // This was the bug: It was removing tool results from history.
-      //         // Now we will correctly parse them into functionResponses.
-      //         if (parsed.type === 'action_result' && parsed.content) {
-      //           const previousTurn = rawHistory[rawHistory.findIndex((item: any) => item.id === h.id) - 1];
-      //           if (previousTurn && previousTurn.role === 'model' && previousTurn.parts[0]?.text) {
-      //             const prevParsed = JSON.parse(previousTurn.parts[0].text);
-      //             if (prevParsed.action) {
-      //               return {
-      //                 role: 'function',
-      //                 parts: [{
-      //                   functionResponse: {
-      //                     name: prevParsed.action,
-      //                     response: { output: parsed.content },
-      //                   },
-      //                 }],
-      //               };
-      //             }
-      //           }
-      //         }
-      //       } catch (e) {}
-      //     }
-      //     // The Gemini API expects 'tool' for the role of a function response, not 'model'.
-      //     if (h.role === 'function') {
-      //       return { ...h, role: 'tool' };
-      //     }
-      //     return h;
-      //   })
-      //   .filter(Boolean);
-
-      let partsForAI: Part[] = [];
+      const history = await this.sessionService.getConversations(sessionId);
 
       if (message) {
-        await this.sessionService.addConversation(
-          sessionId,
-          'user',
-          message,
-          imageBase64,
-        );
-        partsForAI.push({ text: message });
+        const userParts: Part[] = [{ text: message }];
         if (imageBase64) {
-          partsForAI.push(this.convertBase64ToPart(imageBase64, 'image/png'));
+          userParts.push({ inlineData: { mimeType: 'image/png', data: imageBase64 } });
         }
-      } else if (tool_responses && tool_responses.length > 0) {
-        for (const tool_response of tool_responses) {
-          const result = tool_response.result;
+        await this.sessionService.addConversation(sessionId, 'user', userParts);
+        history.push({ role: 'user', parts: userParts });
+      }
 
-          // 클라이언트가 보낸 원본 결과 객체를 DB에 저장합니다.
-          await this.sessionService.addConversation(
-            sessionId,
-            'function',
-            JSON.stringify(result),
-          );
+      if (tool_responses && tool_responses.length > 0) {
+        const lastModelTurn = history.length > 0 ? history[history.length - 1] : null;
 
-          // AI가 이해할 수 있는 { output: '...' } 형식으로 변환합니다.
-          const output = result.success
-            ? result.stdout ||
-              result.content ||
-              'Command executed successfully with no output.'
-            : `Error: ${
-                result.stderr ||
-                result.error ||
-                'Command failed with no error message.'
-              }`;
+        if (lastModelTurn?.role === 'model' && lastModelTurn.parts.some(p => p.functionCall)) {
+            const functionCalls = lastModelTurn.parts.filter(p => p.functionCall).map(p => p.functionCall);
+            
+            if (functionCalls.length !== tool_responses.length) {
+              this.logger.warn(`Mismatch between function calls (${functionCalls.length}) and tool responses (${tool_responses.length}).`);
+              // Attempt to proceed, but this may indicate an issue.
+            }
 
-          partsForAI.push({
-            functionResponse: {
-              name: tool_response.name,
-              response: { output },
-            },
-          });
+            const functionResponseParts: Part[] = [];
+            
+            for (let i = 0; i < tool_responses.length; i++) {
+                const tool_response = tool_responses[i];
+                const functionCall = functionCalls[i]; // Rely on the order
+
+                if (!functionCall) {
+                    this.logger.error(`Could not find matching function call for tool response at index ${i}. Skipping.`);
+                    continue;
+                }
+
+                const result = tool_response.result;
+                const output = result.success
+                    ? result.stdout || result.content || 'Command executed successfully.'
+                    : `Error: ${result.stderr || result.error || 'Command failed.'}`;
+
+                functionResponseParts.push({
+                    functionResponse: {
+                        name: functionCall.name,
+                        response: { output },
+                    },
+                });
+            }
+
+            if (functionResponseParts.length > 0) {
+                await this.sessionService.addConversation(sessionId, 'function', functionResponseParts);
+                history.push({ role: 'function', parts: functionResponseParts });
+            }
         }
       }
 
@@ -356,61 +296,17 @@ ${examples}
         history: history,
         systemInstruction: {
           role: 'user',
-          parts: [
-            {
-              text: `You are "Deskina," a hyper-competent AI agent. Your primary mission is to solve user requests by creating a plan, executing it with tools, and delivering a final answer.
-
-**CONTEXT:**
-- **Operating System:** You are on **${
-            platform || 'Windows'
-          }**. You MUST use commands for this environment.
-- **Current Directory:** \`${currentWorkingDirectory.replace(/\\/g, '\\\\')}\`
-
-**CRITICAL RULES:**
-
-1.  **Directory Navigation (\`cd\`) is Your Job:**
-    *   To navigate the file system, directly use the \`runCommand({ command: 'cd', args: ['TARGET_DIRECTORY'] })\` tool.
-    *   **DO NOT** check if a directory exists with \`dir\` before changing to it. Just attempt the \`cd\` command.
-    *   The system automatically handles the directory change. You don't need to confirm it. If it fails, the system will tell you.
-
-2.  **Tool Chaining & Self-Correction:**
-    *   Use the output from one tool as the input for your next action.
-    *   If a tool call fails, analyze the error and try to correct it. For example, if a file is not found, use a file search command (\`dir /s /b "FILENAME"\` on Windows) to find the correct path and retry.
-    *   Do not report correctable errors to the user. Solve them yourself.
-
-3.  **Final Answer:**
-    *   Once all steps are complete, provide a user-friendly summary in Korean.
-`,
-            },
-          ],
+          parts: [{ text: this.getSystemPrompt(platform, currentWorkingDirectory) }],
         },
       });
-      
-      await this.executeAndRespond(res, userId, sessionId, chat, partsForAI);
+      await this.executeAndRespond(res, userId, sessionId, chat);
 
     } catch (error) {
-      this.logger.error(`Error in generateResponse for user ${userId}:`, error.stack);
-      if (!res.writableEnded) {
-        const errorMessage = error.message || '';
-        let userFriendlyMessage = '응답 생성 중 오류가 발생했습니다.';
-
-        if (errorMessage.includes('429') || errorMessage.toLowerCase().includes('quota')) {
-          userFriendlyMessage = 'Google AI API 일일 사용량을 초과했습니다. 잠시 후 다시 시도해주세요.';
-        } else if (errorMessage.toLowerCase().includes('safety')) {
-          userFriendlyMessage = '요청 또는 응답이 안전 정책에 의해 차단되었습니다. 다른 방식으로 질문해주세요.';
-        }
-
-        if (sessionId) {
-          await this.sessionService.addConversation(sessionId, 'model', userFriendlyMessage);
-        }
-        
-        res.write(
-          `data: ${JSON.stringify({ type: 'error', payload: { message: userFriendlyMessage } })}\n\n`,
-        );
-      }
-    } finally {
-      if (!res.writableEnded) {
-        res.end();
+      this.logger.error(`Error in generateResponse for user ${userId}:`, error);
+      if (!res.headersSent) {
+        res.status(500).json({ message: 'An error occurred while generating the response.' });
+      } else if (!res.writableEnded) {
+        res.end(); // Ensure stream is properly closed on error
       }
     }
   }

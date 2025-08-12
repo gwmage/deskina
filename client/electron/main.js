@@ -137,18 +137,22 @@ ipcMain.handle('run-command', async (event, { command, args, cwd }) => {
   });
 });
 
-ipcMain.handle('readFile', async (event, filePath) => {
+ipcMain.handle('readFile', async (event, { filePath, cwd }) => {
+  // Resolve the absolute path from the cwd and the potentially relative filePath
+  const absolutePath = path.resolve(cwd || os.homedir(), filePath);
   try {
-    const content = await fs.promises.readFile(filePath, 'utf-8');
+    const content = await fs.promises.readFile(absolutePath, 'utf-8');
     return { success: true, content };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('editFile', async (event, { filePath, newContent }) => {
+ipcMain.handle('editFile', async (event, { filePath, newContent, cwd }) => {
+  // Resolve the absolute path from the cwd and the potentially relative filePath
+  const absolutePath = path.resolve(cwd || os.homedir(), filePath);
   try {
-    await fs.promises.writeFile(filePath, newContent, 'utf-8');
+    await fs.promises.writeFile(absolutePath, newContent, 'utf-8');
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };

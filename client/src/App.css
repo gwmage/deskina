@@ -83,6 +83,8 @@ body {
   height: 100vh;
   background-color: var(--background-color);
   position: relative;
+  width: 100%; /* Ensure it tries to take full width of its container */
+  min-width: 0; /* CRITICAL: Prevents flex item from overflowing its container */
 }
 
 .app-container.sidebar-open .chat-container {

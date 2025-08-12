@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["extendedWhereUnique", "postgresqlExtensions"]
@@ -13,40 +10,42 @@ datasource db {
 }
 
 model User {
-  id                String    @id @default(cuid())
-  email             String    @unique
+  id                String       @id @default(cuid())
+  email             String       @unique
   password          String?
-  emailVerified     Boolean   @default(false)
-  verificationToken String?   @unique
-  sessions          Session[]
+  emailVerified     Boolean      @default(false)
+  verificationToken String?      @unique
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
   scripts           Script[]
-  tokenUsages       TokenUsage[] // Add this line
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  sessions          Session[]
+  tokenUsages       TokenUsage[]
 }
 
 model Session {
-  id            String    @id @default(cuid())
+  id            String         @id @default(cuid())
   userId        String
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   title         String
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
   conversations Conversation[]
-  tokenUsages   TokenUsage[] // Add this line
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenUsages   TokenUsage[]
 
   @@index([userId])
 }
 
 model Conversation {
-  id         String   @id @default(cuid())
-  sessionId  String
-  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role       String // "user" or "model"
-  content    String   @db.Text
+  id          String   @id @default(cuid())
+  sessionId   String
+  role        String
+  content     String?   @db.Text
   imageBase64 String?  @db.Text
-  embedding  Unsupported("vector(768)")? 
-  createdAt  DateTime @default(now())
+  embedding   Unsupported("vector(768)")?
+  createdAt   DateTime @default(now())
+  toolCalls   String?
+  parts       Json?    // Add this new column to store structured data like function calls.
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
 }
@@ -54,14 +53,14 @@ model Conversation {
 model TokenUsage {
   id               String   @id @default(cuid())
   userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessionId        String
-  session          Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   promptTokens     Int
   completionTokens Int
   totalTokens      Int
   modelName        String
   createdAt        DateTime @default(now())
+  session          Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([sessionId])
@@ -70,13 +69,13 @@ model TokenUsage {
 model Script {
   id          String   @id @default(cuid())
   userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name        String
   description String?
   filePath    String
-  content     String   @db.Text
+  content     String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, name])
   @@index([userId])
