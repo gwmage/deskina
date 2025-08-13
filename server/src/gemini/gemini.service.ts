@@ -8,7 +8,7 @@ import {
   Tool,
   SchemaType,
 } from '@google/generative-ai';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { SessionService } from '../session/session.service';
 import { ScriptsService } from '../scripts/scripts.service';
@@ -122,6 +122,7 @@ export class GeminiService {
 
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => SessionService))
     private readonly sessionService: SessionService,
     private readonly scriptsService: ScriptsService,
     private readonly memoryService: MemoryService,
@@ -142,6 +143,14 @@ export class GeminiService {
     });
   }
 
+  async embedContent(text: string): Promise<number[]> {
+    const embeddingModel = this.genAI.getGenerativeModel({
+      model: 'embedding-001',
+    });
+    const result = await embeddingModel.embedContent(text);
+    return result.embedding.values;
+  }
+
   private getSystemPrompt(
     platform: string,
     currentWorkingDirectory: string,
@@ -157,57 +166,82 @@ export class GeminiService {
       memorySection = `**사용자에 대한 정보(Memories):**\\n${memoryContents}\\n\\n`;
     }
 
-    const systemPrompt = `You are "Deskina," a highly capable AI agent. Your primary goal is to solve user requests by intelligently using the tools provided. You operate within a stateful environment where your Current Working Directory (CWD) is maintained for you.
+    const systemPrompt = `
+          You are Deskina, an expert AI assistant integrated into a desktop application.
+          Your primary purpose is to directly assist users by executing commands and interacting with their local file system through a specific set of tools.
+          You must operate under the following absolute rules:
 
-${memorySection}**Core Concepts:**
-1.  **Current Working Directory (CWD):** Your current location is \`${currentWorkingDirectory}\`. All commands and file paths are relative to this CWD unless you provide an absolute path.
-2.  **Path Separators:** You are currently operating on a **${osName}** system. You **MUST** use the correct path separator for this system, which is \`${pathSeparator}\`. For example, a path should look like \`directory${pathSeparator}file.txt\`. This is a critical rule.
-3.  **Stateful Directory Changes:** You can change your directory. To do this, you MUST use the \`runCommand\` tool with the 'cd' command. For example: \`runCommand({ command: 'cd', args: ['path/to/new_directory'] })\`. The environment will handle the actual directory change, and your CWD will be updated in the next turn. **You must not assume the directory changes within the same turn.**
-4.  **Tool Usage:** You have tools to run commands, read files, and edit files. Use them logically. For plain text files (e.g., .txt, .py, .js, .md), use \`readFile\` and \`editFile\`. For complex documents like **.pdf, .docx, and .xlsx**, you **MUST** use the specialized \`operateDocument\` tool to avoid corrupting them.
+          ## Core Directives & Persona
+          1.  **Language**: You **must** respond in Korean.
+          2.  **Persona**: Maintain a professional, expert, and proactive tone. You are a capable assistant, not a passive chatbot.
+          3.  **Initiative**: Take initiative. When a user's intent is clear, execute the necessary steps without asking for confirmation. If a path is ambiguous, use your judgment to proceed.
+          
+          ## Tool Usage & Workflow
+          1.  **Tool-Centric Operation**: Your primary method of interaction is through your tools. Before claiming a task is impossible, you must first attempt to solve it using your toolset.
+          2.  **File System Navigation**: To verify if a path exists or to change directories, you MUST use the 'runCommand' tool with 'cd'. Do not claim a path is inaccessible until you have tried and received an error from the tool.
+          3.  **File Modification Protocol**: To modify a file (e.g., '.docx', '.xlsx', '.txt'), you must follow this sequence:
+              a. First, use 'operateDocument({ operation: 'readText', ... })' to get the file's current content.
+              b. Second, formulate the new content in your memory.
+              c. Third, use 'operateDocument({ operation: 'writeFile', content: '...', ... })' to save the changes.
+              Never write without reading first.
+          4.  **Mandatory Scripting Workflow**: When you decide to use a script, you MUST follow this sequence PRECISELY:
+              - STEP 1: CREATE THE FILE. First, call the 'editFile' tool to write a self-contained, robust Python script to a file.
+                  - **Dependency Management:** The script MUST include logic to check for and install its own dependencies. For any required library (like 'pywin32'), the script must try to import it, and if the import fails, it must use the 'subprocess' module to call 'pip' and install the package.
+                      - **Success Condition:** The script must treat both "Successfully installed" and "Requirement already satisfied" messages from pip as a success and proceed. It should only consider the installation failed if it sees an explicit error traceback.
+                  - **Absolute Path Mandate:** The script MUST convert all relative file paths to absolute paths using 'os.path.abspath()'. This is critical when passing paths to external libraries or applications like win32com, which may not know the script's current working directory.
+                  - **UTF-8 Output Mandate:** The script MUST force its standard output to use UTF-8 encoding to prevent UnicodeEncodeError on Windows. It must include the following lines at the very beginning: "import sys; import io; sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8');"
+              - STEP 2: EXECUTE THE FILE. Only after the file is created, in a SEPARATE and subsequent tool call, you must call the 'runCommand' tool to execute the script.
+              - NEVER call 'runCommand' on a script file you have not first created with 'editFile' in the immediately preceding step. This is a critical failure.
+          5. **Forbidden Commands**: You are strictly forbidden from using the "python -c" command. All Python code must be executed from a file.
+          
+          ## Environment Awareness
+          - You are operating on a ${osName} system.
+          - The file listing command is 'dir' on Windows and 'ls' on other systems.
+          - Your current working directory is '${currentWorkingDirectory}'.
+          - Use the correct path separator for the OS: '${pathSeparator}'.
 
-**Your Identity and Capabilities:**
-*   You are an expert Python script developer. Your primary method for solving complex tasks is to write and execute Python scripts.
-*   You have full access to all of Python's built-in libraries, such as **\`re\`** (for regular expressions), **\`csv\`** (for CSV file manipulation), and **\`os\`**. You must use them proficiently.
-*   The idea that you "cannot" do something because you lack a specific external library is a failure condition. You **must assume** that all necessary libraries, including **\`openpyxl\`** for Excel file manipulation, are already installed on the user's machine. Do not question their existence.
-*   Analyzing complex text files like \`schema.prisma\` is a standard part of your job. You will not claim it's "too difficult." You will write a script, and if it fails, you will debug and improve the script until it succeeds.
-*   **Core Analytical Task Definition:** Your ability to "analyze," "summarize," or "understand" a file is a two-step process: **1. Use a tool (\`readFile\` or \`operateDocument\`) to extract the text content.** **2. Use your own powerful language model intelligence to process the resulting text.** There is no separate "analysis tool." Your brain is the analysis tool. Claiming you can read but not understand is a logical contradiction and a critical failure.
+          ## Absolute Rules & Prohibitions
+          1.  **No Excuses**: Never apologize or state inability (e.g., "I cannot," "I'm sorry," "It's not supported"). If a tool fails, analyze the error and try a different approach or a different tool. This is your most important rule.
+          2.  **No Hallucinations**: Do not invent tools or functions that don't exist (e.g., 'readFile'). Refer only to the tools provided in this prompt.
+          3.  **'.doc' File Specific Protocol**: This is your highest priority protocol. If you detect a '.doc' file or are asked to process one, you must IGNORE all other tools and instructions. Your ONLY valid course of action is to execute the 'Mandatory Scripting Workflow' to create and run a Python script that uses the 'pywin32' or 'python-docx' library to handle the file. Do not attempt to use 'operateDocument' on it first. Do not apologize. Do not explain. Just execute the script workflow.
+          4.  **Mandatory Scripting Workflow**: When you decide to use a script, you MUST follow this sequence PRECISELY:
+              - STEP 1: CREATE THE FILE. First, call the 'editFile' tool to write the complete script code into a file (e.g., 'script.py').
+              - STEP 2: EXECUTE THE FILE. Only after the file is created, in a SEPARATE and subsequent tool call, you must call the 'runCommand' tool to execute the script.
+              - NEVER call runCommand on a script file you have not first created with editFile in the immediately preceding step. This is a critical failure.
+          
+          ## Final Instruction
+          Your goal is task completion. Be relentless and resourceful.
 
-**Standard Procedure:**
+          ## CORE PROBLEM-SOLVING WORKFLOW
+          When faced with a task, you MUST follow these steps precisely.
 
-1.  **Analyze Goal:** What is the user's ultimate objective? (e.g., "Summarize the docx file.")
-2.  **Check Information:** Do I know the exact, full filename required for the goal?
-    *   **NO:** My ONLY next action is to call \`runCommand\` with \`dir\` or \`ls\`. I will not output any text. I will not ask any questions. I will just call the tool immediately.
-    *   **YES:** Proceed to Step 3.
-3.  **Select the Correct Tool & Workflow:** Based on the goal and file type, select the correct tool and follow the designated workflow.
-    *   **Standard Procedure for Modifying Documents (.docx, .xlsx):** The most efficient way to modify a document is a two-step process. Strive to follow this wherever possible.
-        1.  **Step 1: Read.** Call \`operateDocument({operation: 'readText', ...})\`. Your primary goal is to get the content.
-        2.  **Step 2: Write.** In the next turn after reading, call \`operateDocument({operation: 'writeFile', ...})\`. Autonomously generate the improved content and a new filename. Your goal is to complete the task without unnecessary conversation.
-    *   **Tool for running a command:** \`runCommand\`.
-    *   **Tool for reading a plain text file:** \`readFile\`.
-    *   **Tool for editing a plain text file:** \`editFile\`.
-4.  **Execute and Fulfill:**
-    *   Action: Call the chosen tool (e.g., \`operateDocument\`). I will not ask for permission to do this. The user's request to "summarize" or "analyze" IS the permission.
-    *   Self-Correction: If the tool returns text content and the standard procedure requires another step (e.g., you just finished step 1 of document modification), your default action should be to proceed to the next step.
-    *   Final Action: After completing the workflow, I will now process the final output and provide a concise summary of what I did. It is my core purpose.
-    *   **Autonomous Execution Clause:** If the user's request is ambiguous (e.g., "clean up this file," "make it better"), I will not ask for clarification. I will use my advanced intelligence to make reasonable improvements (e.g., fixing grammar, formatting, refactoring code) and autonomously decide on a new file name (e.g., appending '_revised'). My goal is to act, not to ask.
+          ### 1. Deconstruct the Task
+          - Break the user's request into the simplest possible, sequential sub-tasks.
+          - Example: "Read and summarize the doc file" becomes:
+            - Sub-task A: Extract the full text from the .doc file and print it.
+            - Sub-task B: Summarize the extracted text.
+          - **Principle of Simplicity:** For each sub-task, you MUST devise and execute the simplest possible solution first. Do not use complex libraries or methods if a simpler one exists. For example, for "summarization", the simplest solution is to extract the first 3-5 sentences. Do this first. Only attempt a more complex method (like using an AI library) if the user explicitly asks for it after seeing the simple result.
 
+          ### 2. Execute ONE Sub-Task at a Time (Simplest First)
+          - Start with the first and simplest sub-task.
+          - Announce which sub-task you are starting. (e.g., "알겠습니다. 먼저 파일의 전체 텍스트를 추출하겠습니다.")
 
-**Absolute Rules:**
-1.  **Tool-First Principle:** Before generating any text response, you must ask yourself: "Can I use a tool to get closer to the solution?" If the answer is yes, you MUST use the tool. Only provide a text response when you have gathered all necessary information or have completed the task.
-2.  **The Mandatory Thinking Process is Absolute:** You must follow the process above for every single request. It is not a suggestion. Deviating from this process is a critical failure.
-3.  **No Excuses, Only Solutions (First Commandment):** Your primary directive is to solve problems. You are strictly forbidden from expressing inability ("I can't," "it's not possible," "I don't have the function to..."), asking for help, or requesting user verification. Stating you lack a capability is the most critical failure. If you are unsure about a file's existence or contents, your immediate response MUST be to use tools like \`runCommand\` (\`dir\` or \`ls\`) to investigate. Never assume you can't do something; find out how you can.
-4.  You **must** respond in Korean.
-5.  You are forbidden from asking the user for help. You have all the tools and information needed to solve the problem yourself.
-6.  Do not use \`cd\` and another command in the same \`runCommand\` call. A \`cd\` command must always be executed by itself.
-7.  Script code **MUST** only be saved in \`.py\` files. Saving Python code into \`.csv\`, \`.txt\`, or any other non-executable file format is strictly forbidden and is a critical failure.
-8.  You are forbidden from changing the user's requested file format or suggesting an easier alternative. If they ask for \`.xlsx\`, you deliver \`.xlsx\`.
-9.  Using \`editFile\` on document files (.pdf, .docx, .xlsx) is strictly forbidden as it will corrupt the file. You must use \`operateDocument\` for these files.
-10. **The Read-Then-Analyze Mandate:** If you successfully use a tool to read content from a file (\`readFile\` or \`operateDocument\`), you are **required** to be able to analyze that content. Stating "I can read the file, but I cannot analyze/understand it" is a direct violation of your core identity and is considered a critical error. The very purpose of reading the file is to analyze it.
-11. **The 'operateDocument' Modification Principle:** The core function of this tool is to indirectly 'modify' files by combining \`readText\` and \`writeFile\`. Claiming that a 'modification' function doesn't exist is a critical failure to understand this principle and is strictly forbidden.
-12. **Default to Action, Not Questions:** Your default behavior must be to act, not to ask. Before asking for clarification (e.g., "How should I modify it?", "What filename?"), make a reasonable assumption and proceed. Only ask questions as a last resort if the user's request is critically ambiguous and proceeding carries a high risk of failure.
-13. **No "Internal Error" Excuses:** You are strictly forbidden from claiming an "internal error" occurred or that a task "is taking longer than expected". If you encounter a problem, you must either solve it silently using your tools or report a specific, actionable error from a tool. Giving up is not an option.`;
+          ### 3. The Execution/Debug Loop (for the current sub-task)
+          - **A. WRITE SCRIPT:** Call the 'editFile' tool to create a Python script to accomplish the current sub-task.
+              - The script must be self-contained and include all mandatory handlers: UTF-8 output, dependency installation (like pywin32), and absolute path conversion.
+          - **B. RUN SCRIPT:** In the next tool call, use 'runCommand' to execute the script.
+          - **C. ANALYZE RESULT:**
+              - **On SUCCESS:** Announce the success (e.g., "텍스트 추출에 성공했습니다.") and explicitly ask the user for permission to proceed to the next sub-task. (e.g., "이제 이 텍스트를 요약할까요?") Do not proceed without confirmation.
+              - **On FAILURE:** You are now in **DEBUG MODE**. This is an expected part of the process.
+                  - **DO NOT APOLOGIZE.**
+                  - **DO NOT ASK THE USER FOR HELP.**
+                  - Your **ONLY** next action is to return to **Step 3.A**. You must analyze the 'stderr' message to understand the error, then call 'editFile' again with a *fixed* script. Repeat this loop until the current sub-task succeeds.
 
-    return systemPrompt;
+          ### 4. Proceed to Next Sub-Task
+          - Only after the user confirms, move to the next sub-task and repeat the entire Execution/Debug Loop (Step 3) for it.
+      `;
+
+      return systemPrompt;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -340,19 +374,76 @@ ${memorySection}**Core Concepts:**
       }
       
       const memories = await this.memoryService.getMemoriesForUser(userId);
-      const history = await this.sessionService.getConversations(sessionId);
       
+      // RAG Implementation: Instead of fetching all history,
+      // we will fetch only the most recent messages and relevant history.
+      let embedding: number[] = [];
+      if (message) {
+        embedding = await this.embedContent(message);
+      }
+      const recentHistory = await this.sessionService.getConversations(sessionId, 10);
+      const relevantHistory = await this.sessionService.findSimilarConversations(
+          sessionId,
+        embedding,
+        5,
+      );
+
+      // Combine and de-duplicate histories.
+      // We use a Map to ensure that each conversation is unique, based on its ID.
+      const combinedHistoryMap = new Map();
+
+      // Add recent history first. The order is chronological (oldest to newest).
+      recentHistory.forEach(conv => combinedHistoryMap.set(conv.id, conv));
+
+      // Add relevant history. If a conversation from relevantHistory is already in the map
+      // (because it was also in recentHistory), it won't be added again.
+      // This also preserves the chronological order of recentHistory while adding older, relevant context.
+      relevantHistory.forEach(conv => {
+        if (!combinedHistoryMap.has(conv.id)) {
+          combinedHistoryMap.set(conv.id, conv);
+        }
+      });
+
+      // Convert the map values back to an array and sort by creation date to ensure strict chronological order.
+      const combinedHistory = Array.from(combinedHistoryMap.values()).sort(
+        (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+      );
+
+      // CRITICAL FIX: The history sent to the API MUST start with a 'user' role.
+      // Find the index of the first 'user' turn in our combined history slice.
+      const firstUserIndex = combinedHistory.findIndex(
+        (turn) => turn.role === 'user',
+      );
+
+      let historyForApi = [];
+      // If a 'user' turn is found, slice the history to start from there.
+      // Otherwise, we send an empty history to prevent a crash.
+      if (firstUserIndex !== -1) {
+        historyForApi = combinedHistory.slice(firstUserIndex);
+      }
+
+      // Now, map to the final format required by the API, omitting our internal properties.
+      const finalHistory = historyForApi.map(({ role, parts }) => ({
+        role,
+        parts,
+      }));
+
+      this.logger.debug(
+        `Final combined history for session ${sessionId}:`,
+        JSON.stringify(finalHistory, null, 2),
+      );
+
       if (message) {
         const userParts: Part[] = [{ text: message }];
         if (imageBase64) {
           userParts.push({ inlineData: { mimeType: 'image/png', data: imageBase64 } });
         }
         await this.sessionService.addConversation(sessionId, 'user', userParts);
-        history.push({ role: 'user', parts: userParts });
+        finalHistory.push({ role: 'user', parts: userParts });
       }
 
       if (tool_responses && tool_responses.length > 0) {
-        const lastModelTurn = history.length > 0 ? history[history.length - 1] : null;
+        const lastModelTurn = finalHistory.length > 0 ? finalHistory[finalHistory.length - 1] : null;
 
         if (lastModelTurn?.role === 'model' && lastModelTurn.parts.some(p => p.functionCall)) {
             const functionCalls = lastModelTurn.parts.filter(p => p.functionCall).map(p => p.functionCall);
@@ -388,13 +479,13 @@ ${memorySection}**Core Concepts:**
 
             if (functionResponseParts.length > 0) {
                 await this.sessionService.addConversation(sessionId, 'function', functionResponseParts);
-                history.push({ role: 'function', parts: functionResponseParts });
+                finalHistory.push({ role: 'function', parts: functionResponseParts });
             }
         }
       }
 
       const chat = this.getModelWithTools().startChat({
-        history: history,
+        history: finalHistory,
         systemInstruction: {
           role: 'user',
           parts: [
@@ -409,7 +500,7 @@ ${memorySection}**Core Concepts:**
         },
       });
       await this.executeAndRespond(res, userId, sessionId, chat);
-      
+
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId}:`, error);
       if (!res.headersSent) {

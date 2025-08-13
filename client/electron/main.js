@@ -7,6 +7,10 @@ const { TextDecoder } = require('util');
 const iconv = require('iconv-lite');
 const os = require('os');
 const http = require('http'); // For making API requests
+const pdf = require('pdf-parse');
+const mammoth = require('mammoth');
+const XLSX = require('xlsx');
+const { Document, Packer, Paragraph, TextRun } = require('docx');
 
 function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
@@ -219,6 +223,88 @@ ipcMain.handle('run-script', async (event, { name, token, cwd }) => {
 ipcMain.handle('get-home-dir', async () => {
   return os.homedir();
 });
+
+ipcMain.handle(
+  'operate-document',
+  async (event, { filePath, operation, params, cwd }) => {
+    const absolutePath = path.resolve(cwd || os.homedir(), filePath);
+    const extension = path.extname(filePath).toLowerCase();
+
+    try {
+      if (operation !== 'writeFile' && !fs.existsSync(absolutePath)) {
+        return { success: false, error: `File not found: ${absolutePath}` };
+      }
+
+      if (operation === 'readText') {
+        let textContent = '';
+        if (extension === '.pdf') {
+          const dataBuffer = fs.readFileSync(absolutePath);
+          const data = await pdf(dataBuffer);
+          textContent = data.text;
+        } else if (extension === '.docx') {
+          const result = await mammoth.extractRawText({ path: absolutePath });
+          textContent = result.value;
+        } else if (extension === '.xlsx') {
+          const workbook = XLSX.readFile(absolutePath);
+          workbook.SheetNames.forEach((sheetName) => {
+            const worksheet = workbook.Sheets[sheetName];
+            textContent += `--- Sheet: ${sheetName} ---\n`;
+            textContent += XLSX.utils.sheet_to_csv(worksheet);
+            textContent += '\n';
+          });
+        } else {
+          return {
+            success: false,
+            error: `Unsupported file type for readText: ${extension}`,
+          };
+        }
+        return { success: true, content: textContent };
+      } else if (operation === 'writeFile') {
+        if (!params || typeof params.content !== 'string') {
+          return { success: false, error: 'writeFile operation requires a content parameter.' };
+        }
+
+        if (extension === '.docx') {
+          const paragraphs = params.content.split('\n').map(line => new Paragraph({
+            children: [new TextRun(line)],
+          }));
+
+          const doc = new Document({
+            sections: [{
+              properties: {},
+              children: paragraphs,
+            }],
+          });
+
+          const buffer = await Packer.toBuffer(doc);
+          fs.writeFileSync(absolutePath, buffer);
+
+        } else if (extension === '.xlsx') {
+          // Assume content is CSV-like string.
+          const rows = params.content.split('\n').map(row => row.split(','));
+          const workbook = XLSX.utils.book_new();
+          const worksheet = XLSX.utils.aoa_to_sheet(rows);
+          XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
+          XLSX.writeFile(workbook, absolutePath);
+
+        } else {
+          return { success: false, error: 'writeFile operation is currently only supported for .docx and .xlsx files.' };
+        }
+
+        return { success: true, stdout: `File successfully saved to ${absolutePath}` };
+
+      } else {
+        return {
+          success: false,
+          error: `Unsupported operation: ${operation}`,
+        };
+      }
+    } catch (error) {
+      console.error(`[Main Process] Error in operate-document for file "${filePath}":`, error);
+      return { success: false, error: `An error occurred: ${error.message}\n${error.stack}` };
+    }
+  },
+);
 
 function getShellEncoding() {
   return process.platform === 'win32' ? 'cp949' : 'utf-8';

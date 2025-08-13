@@ -324,6 +324,8 @@ const App = () => {
         }
     } else if (toolCall.name === 'runScript') {
       result = await window.electronAPI.runScript({ name: toolCall.args.name, token: token, cwd });
+    } else if (toolCall.name === 'operateDocument') {
+      result = await window.electronAPI.operateDocument({ ...toolCall.args, cwd });
     } else if (toolCall.name === 'editFile') {
       // editFile is handled via proposal UI, not direct execution here
       setEditProposal({ ...toolCall.args, originalContent: 'loading', toolCallId: toolCallId });

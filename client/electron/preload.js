@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   editFile: (params) => ipcRenderer.invoke('editFile', params),
   runScript: (params) => ipcRenderer.invoke('run-script', params),
   getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+  operateDocument: (params) => ipcRenderer.invoke('operate-document', params),
 });
 
 console.log('[Preload] window.electronAPI exposed.'); 

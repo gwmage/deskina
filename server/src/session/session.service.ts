@@ -1,12 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { Part } from '@google/generative-ai';
 import { PrismaService } from '../prisma.service';
 import { Prisma } from '@prisma/client';
+import { GeminiService } from '../gemini/gemini.service';
 
 @Injectable()
 export class SessionService {
   private readonly logger = new Logger(SessionService.name);
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Inject(forwardRef(() => GeminiService))
+    private geminiService: GeminiService,
+  ) {}
 
   async create(title: string, userId: string) {
     return this.prisma.session.create({
@@ -38,16 +43,80 @@ export class SessionService {
     role: 'user' | 'model' | 'function',
     parts: Part[],
   ) {
-    // The 'parts' array can contain complex objects, which Prisma expects as JsonValue
     const partsAsJson = parts as unknown as Prisma.JsonArray;
+
+    const contentToEmbed = parts
+      .map((part) => part.text)
+      .filter(Boolean)
+      .join('\\n');
     
-    return this.prisma.conversation.create({
+    // First, create the conversation without the embedding
+    const conversation = await this.prisma.conversation.create({
       data: {
         sessionId,
         role,
         parts: partsAsJson,
       },
     });
+
+    // Then, if there's content to embed, generate and update the embedding
+    if (contentToEmbed && (role === 'user' || role === 'model')) {
+      try {
+        const embedding = await this.geminiService.embedContent(contentToEmbed);
+        const vector = `[${embedding.join(',')}]`;
+        
+        await this.prisma.$executeRaw`
+          UPDATE "Conversation"
+          SET "embedding" = ${vector}::vector
+          WHERE "id" = ${conversation.id}
+        `;
+        
+      } catch (error) {
+        this.logger.error(
+          `[SessionService] Failed to generate or save embedding for conversation ${conversation.id}`,
+          error,
+        );
+      }
+    }
+
+    return conversation;
+  }
+
+  async findSimilarConversations(
+    sessionId: string,
+    embedding: number[],
+    limit = 5,
+  ): Promise<any[]> {
+    if (!embedding || embedding.length === 0) {
+      return [];
+    }
+
+    const vector = `[${embedding.join(',')}]`;
+    try {
+      const result = await this.prisma.$queryRaw`
+        SELECT
+          "id",
+          "role",
+          "parts",
+          "createdAt",
+          1 - (embedding <=> ${vector}::vector) as similarity
+        FROM
+          "Conversation"
+        WHERE
+          "sessionId" = ${sessionId} AND "embedding" IS NOT NULL
+        ORDER BY
+          similarity DESC
+        LIMIT
+          ${limit}
+      `;
+      return result as any[];
+    } catch (error) {
+      this.logger.error(
+        `Failed to find similar conversations for session ${sessionId}`,
+        error,
+      );
+      return [];
+    }
   }
 
   async getConversationsForClient(
@@ -132,18 +201,22 @@ export class SessionService {
   async getConversations(sessionId: string, limit = 50) {
     const dbHistory = await this.prisma.conversation.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: 'desc' },
       take: limit,
     });
 
-    const apiHistory: { role: 'user' | 'model' | 'function'; parts: Part[] }[] = [];
+    // The history is fetched in reverse chronological order (newest first).
+    // We need to reverse it back to chronological order (oldest first) for processing.
+    const chronologicalHistory = dbHistory.reverse();
 
-    for (const turn of dbHistory) {
+    const apiHistory: { role: 'user' | 'model' | 'function'; parts: Part[], id: string, createdAt: Date }[] = [];
+
+    for (const turn of chronologicalHistory) {
       // The 'parts' column is Json?. It can be null for older data.
       if (turn.parts && Array.isArray(turn.parts)) {
         // Cast via 'unknown' to satisfy TypeScript's strictness.
         const parts = turn.parts as unknown as Part[];
-        apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts });
+        apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts, id: turn.id, createdAt: turn.createdAt });
       } else {
         // Handle legacy data where 'parts' is null and we rely on 'content'.
         const legacyParts: Part[] = [];
@@ -154,7 +227,7 @@ export class SessionService {
           legacyParts.push({ inlineData: { mimeType: 'image/png', data: turn.imageBase64 } });
         }
         if (legacyParts.length > 0) {
-          apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts: legacyParts });
+          apiHistory.push({ role: turn.role as 'user' | 'model' | 'function', parts: legacyParts, id: turn.id, createdAt: turn.createdAt });
         }
       }
     }
