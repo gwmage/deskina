@@ -245,6 +245,12 @@ const App = () => {
   const inputRef = useRef(null);
   const focusAfterLoadingRef = useRef(false);
   const isNewSessionRef = useRef(false);
+  const cwdRef = useRef(''); // Ref to hold the most up-to-date CWD
+
+  // Sync state with ref whenever it changes
+  useEffect(() => {
+    cwdRef.current = currentWorkingDirectory;
+  }, [currentWorkingDirectory]);
 
   const focusInput = () => setTimeout(() => inputRef.current?.focus(), 0);
 
@@ -293,7 +299,7 @@ const App = () => {
     }
   }, [token, defaultCwd]);
 
-  async function executeToolCall(toolCall) {
+  async function executeToolCall(toolCall, cwd) {
     if (!toolCall || !toolCall.name) return null; // Return null on failure
 
     let result;
@@ -309,29 +315,20 @@ const App = () => {
     setConversation(prev => [...prev, executingTurn]);
 
     if (toolCall.name === 'runCommand') {
-      // It's crucial to await here to ensure CWD is updated before the next command
-      result = await window.electronAPI.runCommand({ ...toolCall.args, cwd: currentWorkingDirectory });
-      if (result.success && result.newCwd) {
-        // Use a functional update to ensure we're using the latest state
-        setCurrentWorkingDirectory(result.newCwd);
-        const sessionId = sessionIdRef.current;
-        if (sessionId) {
-          localStorage.setItem(`cwd_${sessionId}`, result.newCwd);
-        }
-      }
+      result = await window.electronAPI.runCommand({ ...toolCall.args, cwd });
     } else if (toolCall.name === 'readFile') {
         if (typeof toolCall.args.filePath !== 'string') {
             result = { success: false, error: `Invalid filePath: Expected a string, but received ${typeof toolCall.args.filePath}. Please provide a valid file path.` };
         } else {
-            result = await window.electronAPI.readFile({ filePath: toolCall.args.filePath, cwd: currentWorkingDirectory });
+            result = await window.electronAPI.readFile({ filePath: toolCall.args.filePath, cwd });
         }
     } else if (toolCall.name === 'runScript') {
-      result = await window.electronAPI.runScript({ name: toolCall.args.name, token: token, cwd: currentWorkingDirectory });
+      result = await window.electronAPI.runScript({ name: toolCall.args.name, token: token, cwd });
     } else if (toolCall.name === 'editFile') {
       // editFile is handled via proposal UI, not direct execution here
       setEditProposal({ ...toolCall.args, originalContent: 'loading', toolCallId: toolCallId });
       try {
-          const originalContentResult = await window.electronAPI.readFile({filePath: toolCall.args.filePath, cwd: currentWorkingDirectory});
+          const originalContentResult = await window.electronAPI.readFile({filePath: toolCall.args.filePath, cwd });
           if (originalContentResult.success) {
             setEditProposal(prev => ({ ...prev, originalContent: originalContentResult.content }));
           } else {
@@ -365,19 +362,35 @@ const App = () => {
       }
       
       const allResults = [];
+      let currentCwdInLoop = cwdRef.current; // Initialize from ref, not state
+
       // Use a sequential for...of loop to ensure commands like 'cd' complete
       // before the next command runs.
       for (const toolCall of toolCalls) {
-          const res = await executeToolCall(toolCall);
-          if(res) { // executeToolCall might return null for proposals
+          const res = await executeToolCall(toolCall, currentCwdInLoop);
+          
+          if (res) { // executeToolCall might return null for proposals
+            // Check for CWD changes from runCommand
+            if (res.toolCall.name === 'runCommand' && res.result.success && res.result.newCwd) {
+              const newCwd = res.result.newCwd;
+              currentCwdInLoop = newCwd; // Update local CWD for the next iteration
+              
+              // Update React state and localStorage, which also updates the ref via useEffect
+              setCurrentWorkingDirectory(newCwd);
+              const sessionId = sessionIdRef.current;
+              if (sessionId) {
+                localStorage.setItem(`cwd_${sessionId}`, newCwd);
+              }
+            }
             allResults.push(res);
           }
       }
       
       // After all tools have been executed sequentially, send all results back in one batch.
       if(allResults.length > 0) {
-        await sendToolResults(allResults);
+        await sendToolResults(allResults, currentCwdInLoop);
       }
+      // We don't return the CWD here anymore as it's handled within the loop and by sendToolResults
   }
 
 
@@ -409,7 +422,7 @@ const App = () => {
         
         // Stream is done, now execute all collected tool calls
         if (toolCallsToExecuteRef.current.length > 0) {
-            executeAndProcessAllTools(toolCallsToExecuteRef.current); // Pass state here
+            executeAndProcessAllTools(toolCallsToExecuteRef.current); 
         }
         break;
       }
@@ -476,7 +489,7 @@ const App = () => {
     }
   }
 
-  async function sendToolResults(results) { // 6. Receive functionCalls
+  async function sendToolResults(results, finalCwd) { 
     const sessionId = sessionIdRef.current;
     if (!sessionId || results.length === 0) return;
     
@@ -500,7 +513,7 @@ const App = () => {
         body: JSON.stringify({
           sessionId,
           platform: window.navigator.platform,
-          currentWorkingDirectory,
+          currentWorkingDirectory: finalCwd,
           tool_responses,
         }),
       });
@@ -780,11 +793,11 @@ const App = () => {
       <EditFileProposal proposal={editProposal} onAccept={() => {
           // This needs to be implemented properly
           console.log("Accepting edit", editProposal);
-          window.electronAPI.editFile({ filePath: editProposal.filePath, newContent: editProposal.newContent })
+          window.electronAPI.editFile({ filePath: editProposal.filePath, newContent: editProposal.newContent, cwd: currentWorkingDirectory })
               .then(result => {
                   if(result.success) {
                       console.log("File saved successfully");
-                      sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: true, message: `File ${editProposal.filePath} has been updated.` } }]);
+                      sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: true, message: `File ${editProposal.filePath} has been updated.` } }], currentWorkingDirectory);
                   } else {
                       console.error("Failed to save file:", result.error);
                       const errorTurn = { id: `result-edit-fail-${Date.now()}`, role: 'system', type: 'action_result', content: `Failed to save file: ${result.error}`, success: false };
@@ -793,7 +806,7 @@ const App = () => {
               });
           setEditProposal(null);
       }} onReject={() => {
-          sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: false, message: 'User rejected the file edit proposal.' } }]);
+          sendToolResults([{ toolCall: { name: 'editFile', args: editProposal }, result: { success: false, message: 'User rejected the file edit proposal.' } }], currentWorkingDirectory);
           setEditProposal(null);
       }} />
     </div>
