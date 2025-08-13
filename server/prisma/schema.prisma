@@ -20,6 +20,7 @@ model User {
   scripts           Script[]
   sessions          Session[]
   tokenUsages       TokenUsage[]
+  memories          Memory[]
 }
 
 model Session {
@@ -78,5 +79,17 @@ model Script {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, name])
+  @@index([userId])
+}
+
+model Memory {
+  id        String                        @id @default(cuid())
+  userId    String
+  content   String                        @db.Text
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime                      @default(now())
+  updatedAt DateTime                      @updatedAt
+  user      User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId])
 }

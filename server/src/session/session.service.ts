@@ -27,7 +27,7 @@ export class SessionService {
     const skip = (page - 1) * limit;
     return this.prisma.session.findMany({
       where: { userId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
       skip: skip,
       take: limit,
     });

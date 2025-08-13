@@ -14,6 +14,8 @@ import { SessionService } from '../session/session.service';
 import { ScriptsService } from '../scripts/scripts.service';
 import { Response } from 'express';
 import { ConversationStreamDto } from './dto/conversation-stream.dto';
+import { MemoryService } from 'src/memory/memory.service';
+import { Memory } from '@prisma/client';
 
 const runCommandTool: FunctionDeclaration = {
   name: 'runCommand',
@@ -82,6 +84,7 @@ export class GeminiService {
     private readonly prisma: PrismaService,
     private readonly sessionService: SessionService,
     private readonly scriptsService: ScriptsService,
+    private readonly memoryService: MemoryService,
   ) {
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   }
@@ -93,14 +96,30 @@ export class GeminiService {
     });
   }
 
-  private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
+  private getModel() {
+    return this.genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash-latest',
+    });
+  }
+
+  private getSystemPrompt(
+    platform: string,
+    currentWorkingDirectory: string,
+    memories: Memory[],
+  ): string {
     const isWindows = platform.toLowerCase().startsWith('win');
     const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
     const pathSeparator = isWindows ? '\\\\' : '/'; // JSON 문자열 내에서 사용하려면 역슬래시 이스케이프 필요
 
+    let memorySection = '';
+    if (memories.length > 0) {
+      const memoryContents = memories.map((mem) => `- ${mem.content}`).join('\n');
+      memorySection = `**사용자에 대한 정보(Memories):**\n${memoryContents}\n\n`;
+    }
+
     const systemPrompt = `You are "Deskina," a highly capable AI agent. Your primary goal is to solve user requests by intelligently using the tools provided. You operate within a stateful environment where your Current Working Directory (CWD) is maintained for you.
 
-**Core Concepts:**
+${memorySection}**Core Concepts:**
 1.  **Current Working Directory (CWD):** Your current location is \`${currentWorkingDirectory}\`. All commands and file paths are relative to this CWD unless you provide an absolute path.
 2.  **Path Separators:** You are currently operating on a **${osName}** system. You **MUST** use the correct path separator for this system, which is \`${pathSeparator}\`. For example, a path should look like \`directory${pathSeparator}file.txt\`. This is a critical rule.
 3.  **Stateful Directory Changes:** You can change your directory. To do this, you MUST use the \`runCommand\` tool with the 'cd' command. For example: \`runCommand({ command: 'cd', args: ['path/to/new_directory'] })\`. The environment will handle the actual directory change, and your CWD will be updated in the next turn. **You must not assume the directory changes within the same turn.**
@@ -209,6 +228,49 @@ export class GeminiService {
     }
 
     res.end();
+
+    // Do not await this, let it run in the background
+    this.summarizeAndStoreMemory(userId, sessionId).catch((error) => {
+      this.logger.error(
+        `Failed to summarize and store memory for session ${sessionId}`,
+        error.stack,
+      );
+    });
+  }
+
+  async summarizeAndStoreMemory(userId: string, sessionId: string) {
+    this.logger.log(`Starting memory summarization for session ${sessionId}`);
+    const history = await this.sessionService.getConversations(sessionId, 20); // Get last 20 turns
+
+    if (history.length < 2) {
+      this.logger.log('Not enough conversation history to summarize.');
+      return;
+    }
+
+    const conversationText = history
+      .map((turn) => {
+        const content = turn.parts
+          .filter((part) => part.text)
+          .map((part) => part.text)
+          .join(' ');
+        return `${turn.role}: ${content}`;
+      })
+      .join('\n');
+
+    const prompt = `다음 대화 내용을 바탕으로 사용자의 지속적인 특징, 선호도, 또는 기술 수준에 대해 딱 한 문장으로 요약해줘. 단, 일회성 질문이나 민감한 개인정보는 제외하고, 앞으로의 대화에 도움이 될 만한 정보만 추출해줘. 만약 기억할 만한 내용이 없다면 "저장할 기억 없음" 이라고만 답해줘.\n\n---\n\n${conversationText}`;
+
+    const model = this.getModel();
+    const result = await model.generateContent(prompt);
+    const summary = result.response.text();
+
+    if (summary && !summary.includes('저장할 기억 없음')) {
+      await this.memoryService.createMemory(userId, summary);
+      this.logger.log(
+        `Stored new memory for user ${userId}: "${summary}"`,
+      );
+    } else {
+      this.logger.log('No new memory to store for this conversation.');
+    }
   }
 
   async generateResponse(
@@ -233,6 +295,7 @@ export class GeminiService {
         res.write(`data: ${JSON.stringify({ type: 'session_id', payload: sessionId })}\n\n`);
       }
       
+      const memories = await this.memoryService.getMemoriesForUser(userId);
       const history = await this.sessionService.getConversations(sessionId);
 
       if (message) {
@@ -290,7 +353,15 @@ export class GeminiService {
         history: history,
         systemInstruction: {
           role: 'user',
-          parts: [{ text: this.getSystemPrompt(platform, currentWorkingDirectory) }],
+          parts: [
+            {
+              text: this.getSystemPrompt(
+                platform,
+                currentWorkingDirectory,
+                memories,
+              ),
+            },
+          ],
         },
       });
       await this.executeAndRespond(res, userId, sessionId, chat);

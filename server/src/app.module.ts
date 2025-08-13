@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { EmailModule } from './email/email.module';
 import { ScriptsModule } from './scripts/scripts.module';
+import { MemoryModule } from './memory/memory.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { ScriptsModule } from './scripts/scripts.module';
     AuthModule,
     EmailModule,
     ScriptsModule,
+    MemoryModule,
   ],
   controllers: [AppController],
   providers: [AppService],
