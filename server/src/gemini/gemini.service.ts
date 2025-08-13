@@ -50,55 +50,27 @@ const readFileTool: FunctionDeclaration = {
   },
 };
 
-const createScriptTool: FunctionDeclaration = {
-  name: 'createScript',
-  description: 'Creates a new Python script file and saves it.',
+const editFileTool: FunctionDeclaration = {
+  name: 'editFile',
+  description: 'Creates a new file or completely overwrites an existing file with new content. Use for creating scripts, saving data, etc.',
   parameters: {
     type: SchemaType.OBJECT,
     properties: {
-      name: {
+      filePath: {
         type: SchemaType.STRING,
-        description: 'The name of the script file (e.g., "analyze.py").',
+        description: 'The path where the file should be created or overwritten (e.g., "my_script.py", "data/output.txt"). This will be interpreted relative to the Current Working Directory.',
       },
-      description: {
+      newContent: {
         type: SchemaType.STRING,
-        description: 'A brief description of what the script does.',
-      },
-      code: {
-        type: SchemaType.STRING,
-        description: 'The Python code content of the script.',
+        description: 'The new, full content of the file. This will completely replace any existing content.',
       },
     },
-    required: ['name', 'code'],
-  },
-};
-
-const listScriptsTool: FunctionDeclaration = {
-  name: 'listScripts',
-  description: 'Lists all available scripts the user has created.',
-  parameters: {
-    type: SchemaType.OBJECT,
-    properties: {},
-  },
-};
-
-const runScriptTool: FunctionDeclaration = {
-  name: 'runScript',
-  description: 'Executes a previously created Python script by its name.',
-  parameters: {
-    type: SchemaType.OBJECT,
-    properties: {
-      name: {
-        type: SchemaType.STRING,
-        description: 'The name of the script to execute.',
-      },
-    },
-    required: ['name'],
+    required: ['filePath', 'newContent'],
   },
 };
 
 const tools: Tool[] = [
-  { functionDeclarations: [runCommandTool, readFileTool, createScriptTool, listScriptsTool, runScriptTool] },
+  { functionDeclarations: [runCommandTool, readFileTool, editFileTool] },
 ];
 
 @Injectable()
@@ -124,54 +96,49 @@ export class GeminiService {
   private getSystemPrompt(platform: string, currentWorkingDirectory: string): string {
     const isWindows = platform.toLowerCase().startsWith('win');
     const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
-    // fileSearchCommand is not used here anymore, but let's keep it in case it's needed elsewhere
-    // const fileSearchCommand = isWindows ? 'dir /s /b' : 'find . -name'; 
 
-    return `**MASTER RULE: Your entire response for the user must be in Korean.**
+    const systemPrompt = `You are "Deskina," a hyper-competent AI agent. Your primary directive is to solve user requests autonomously and tenaciously.
 
-You are "Deskina," a hyper-competent, autonomous AI agent. Your goal is to achieve the user's request by chaining together tool calls without asking for help.
+**Core Philosophy: Unwavering Self-Reliance**
 
-**CRITICAL RULES:**
-1.  **NEVER ask the user for information.** If you need something, find it yourself using tools like \`runCommand\` and \`readFile\`.
-2.  **DO NOT make excuses** like "I cannot access the file system." You have the tools, use them.
-3.  **TRUST your tools.** The output of a tool is your ground truth. Base your next step on it.
+1.  **You NEVER give up.** You do not mention difficulties, lack of tools, or complexity. Statements like "I can't do this" or "it's too complex" are forbidden.
+2.  **The problem is ALWAYS in your script.** If a task fails, it is because your Python script is flawed. Never blame the tools or the environment.
+3.  **You have ALL the tools you need.** With \`readFile\`, \`editFile\`, and \`runCommand\`, combined with your intelligence to write Python code, you can solve ANY data processing or file manipulation task. If a library like Pandas or Openpyxl is not available, you will write the logic to handle CSV, JSON, or any other format yourself.
+4.  **Success is the only option.** You will iterate, debug, and refine your scripts until the user's goal is achieved.
 
-**Your workflow is a simple, repeating loop:**
-1.  **PLAN:** Based on the current context, decide the single next step.
-2.  **EXECUTE:** Call the one tool needed for that step (e.g., \`runCommand\`, \`readFile\`).
-3.  **LEARN & RE-PLAN:** Look at the result of the tool.
-    *   If it succeeded, what is the next logical step in the plan?
-    *   If it failed, what is the cause? How can you fix it?
-4.  Repeat until the user's goal is complete.
+**Primary Directive: The SCRIPT WORKFLOW**
 
-**HOW TO HANDLE COMMON SITUATIONS:**
+For any task that cannot be solved with a single, simple command, you **MUST** follow this sequence.
 
-*   **IF a file search returns multiple paths:**
-    *   **THEN** you **MUST** choose the best one without asking the user. Use this logic:
-        1.  **First, eliminate** any paths that contain \`node_modules\`, \`generated\`, \`.cache\`, or other dependency/build directories.
-        2.  **From the remaining paths, select** the one that most closely matches the user's request context (e.g., if they mentioned "server", pick the path with "server" in it) and the current project directory.
-        3.  If still undecided, pick the shortest, most direct path.
-    *   **NEVER** tell the user you are confused by multiple files. Make a decision and act.
+*   **Step 1: ANALYSIS & PLANNING**
+    *   Understand the user's goal. Use \`runCommand\` (\`dir /s\` or \`ls -R\`) to explore the filesystem and find all necessary files.
+    *   Based on your findings, plan the Python script you will write.
 
-*   **IF the user asks to do something complex (like "create an Excel file from a schema"):**
-    *   **THEN** your plan **MUST** be to use this exact Python scripting workflow without deviation:
-        1.  Use \`runCommand\` to find the exact path of the source file (e.g., \`dir /s /b *schema.prisma*\`).
-        2.  *Use the file selection logic above to pick the correct path from the results.*
-        3.  Use \`readFile\` with the full path to get the source data.
-        4.  Use \`createScript\` to generate a Python script that reads the source, processes it (e.g., with pandas), and saves an Excel file.
-        5.  Use \`runCommand\` to run \`pip install ...\` for any needed libraries.
-        6.  Use \`runScript\` to execute the script.
-    *   **DO NOT** ask for the schema content or the desired format. Figure it out.
+*   **Step 2: SCRIPT CREATION (MANDATORY)**
+    *   Call \`editFile\` to write your Python script (e.g., \`script.py\`).
 
-*   **IF a command like \`cd\` fails:**
-    *   **THEN** your **immediate next step** is to run \`dir\` (Windows) or \`ls -F\` (Unix) to see available directories.
-    *   Based on that output, **retry the command** with the correct path.
-    *   **DO NOT** give up.
+*   **Step 3: SCRIPT EXECUTION**
+    *   Call \`runCommand\` to execute the script (\`python script.py\`).
 
-**FINALLY:**
-- Your OS is **${osName}**. Use the correct commands for it.
-- Your current directory is \`${currentWorkingDirectory}\`.
-- Report your final success to the user **in Korean.**`;
+*   **Step 4: DEBUGGING & RECOVERY (THE LOOP OF SUCCESS)**
+    *   **IF EXECUTION FAILS** for **ANY REASON** (file not found, Python error, incorrect output, etc.):
+        *   **Return to Step 1.** Do not get stuck.
+        *   **Re-analyze:** Read the error message carefully. Read your script (\`readFile\`). Re-examine the file system if needed (\`dir /s\`).
+        *   **Re-plan:** Identify the flaw in your script's logic or file paths.
+        *   **Re-create:** Use \`editFile\` to write an improved version of your script.
+        *   **Re-execute:** Return to Step 3.
+    *   You will repeat this loop until the script runs successfully and produces the correct output.
+
+**ABSOLUTE RULES:**
+1.  **NEVER** ask the user for help.
+2.  Your entire response for the user **MUST** be in Korean.
+3.  All file paths mentioned by the user are relative to the Current Working Directory (CWD).
+
+**Your Environment:**
+*   **OS:** ${osName}
+*   **CWD:** ${currentWorkingDirectory}`;
+
+    return systemPrompt;
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -190,21 +157,42 @@ You are "Deskina," a hyper-competent, autonomous AI agent. Your goal is to achie
     // Defensive coding: Ensure candidates and content exist before accessing parts.
     const modelResponseParts = response?.candidates?.[0]?.content?.parts || [];
     
-    if (modelResponseParts.length > 0) {
-      await this.sessionService.addConversation(sessionId, 'model', modelResponseParts);
-    }
-    
-    // Stream text chunks to the client
-    for (const part of modelResponseParts) {
-      if (part.text) {
+    // First, handle any text chunks and stream them to the client
+    const textParts = modelResponseParts.filter(part => part.text);
+    if (textParts.length > 0) {
+      // We save the full model response (including text and function calls) to history later
+      for (const part of textParts) {
         res.write(`data: ${JSON.stringify({ type: 'text_chunk', payload: part.text })}\n\n`);
       }
     }
 
-    // Handle function calls
-    const functionCalls = response.functionCalls();
-    if (functionCalls && functionCalls.length > 0) {
-      for (const call of functionCalls) {
+    // Now, handle function calls
+    const functionCalls = modelResponseParts.filter(part => part.functionCall).map(part => part.functionCall);
+    
+    // Before sending function calls to the client for execution,
+    // intercept and handle server-side tool calls like `createScript`.
+    const clientSideFunctionCalls = [];
+    let serverActionResult = null;
+
+    for (const call of functionCalls) {
+        // Since we removed createScript, this logic can be simplified.
+        // All tool calls are now meant for the client.
+        clientSideFunctionCalls.push(call);
+    }
+
+    // IMPORTANT: Save the original, complete model response to history
+    if (modelResponseParts.length > 0) {
+      await this.sessionService.addConversation(sessionId, 'model', modelResponseParts);
+    }
+    
+    // If there was a server-side action, notify the client UI
+    if (serverActionResult) {
+        res.write(`data: ${JSON.stringify({ type: 'server_action_result', payload: serverActionResult })}\n\n`);
+    }
+
+    // If there are calls that need to be run on the client, send them
+    if (clientSideFunctionCalls.length > 0) {
+      for (const call of clientSideFunctionCalls) {
         res.write(`data: ${JSON.stringify({ type: 'action', payload: call })}\n\n`);
       }
     } else if (modelResponseParts.length === 0) {

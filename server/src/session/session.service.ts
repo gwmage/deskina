@@ -57,76 +57,70 @@ export class SessionService {
   ) {
     const history = await this.prisma.conversation.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'desc' }, // Get history in reverse chronological order
+      orderBy: { createdAt: 'desc' },
       take: limit,
       skip: skip,
     });
 
     const clientHistory = [];
-    const processedIndices = new Set<number>();
+    for (const turn of history) {
+      try {
+        const parts = (turn.parts as unknown as Part[]) || [];
+        
+        if (turn.role === 'user') {
+          const clientTurn = { ...turn };
+          // Ensure content/image is available for the client from `parts` if they don't exist (for new data)
+          if (!clientTurn.content && parts.some(p => p.text)) {
+            clientTurn.content = parts.filter(p => p.text).map(p => p.text).join('\\n');
+          }
+          if (!clientTurn.imageBase64 && parts.some(p => p.inlineData)) {
+            clientTurn.imageBase64 = parts.find(p => p.inlineData)?.inlineData.data;
+          }
+          clientHistory.push(clientTurn);
 
-    for (let i = 0; i < history.length; i++) {
-      if (processedIndices.has(i)) {
-        continue;
-      }
+        } else if (turn.role === 'model') {
+          const textParts = parts.filter(p => p.text);
+          const functionCallParts = parts.filter(p => p.functionCall);
 
-      const turn = history[i];
-
-      // A 'function' role turn contains the results of function calls.
-      // It should be preceded by a 'model' role turn that made the calls.
-      if (
-        turn.role === 'function' &&
-        i + 1 < history.length &&
-        history[i + 1].role === 'model'
-      ) {
-        const functionResultTurn = turn;
-        const modelCallTurn = history[i + 1];
-
-        const functionCalls = (modelCallTurn.parts as unknown as Part[])?.filter(p => p.functionCall).map(p => p.functionCall);
-        const functionResponses = (functionResultTurn.parts as unknown as Part[])?.filter(p => p.functionResponse).map(p => p.functionResponse);
-
-        if (functionCalls && functionResponses && functionCalls.length > 0 && functionCalls.length === functionResponses.length) {
-            // Iterate backwards through the calls/responses because the history is DESC.
-            // This adds them to clientHistory in chronological order for that pair.
-            for (let j = functionCalls.length - 1; j >= 0; j--) {
-                const call = functionCalls[j];
-                const response = functionResponses[j];
-
-                if (!call || !response) continue;
-
-                const resultOutput = (response.response as { output?: string })?.output ?? 'No output.';
-                const success = !String(resultOutput).startsWith('Error:');
-                
-                // Add the result display first
-                clientHistory.push({
-                    id: `${functionResultTurn.id}-result-${j}`,
-                    role: 'system',
-                    type: 'action_result',
-                    content: resultOutput,
-                    success: success,
-                });
-
-                // Then add the call display
-                clientHistory.push({
-                    id: `${modelCallTurn.id}-action-${j}`,
-                    role: 'system',
-                    type: 'action_executing',
-                    content: `⚡️ **${call.name}**\n\`\`\`json\n${JSON.stringify(call.args, null, 2)}\n\`\`\``,
-                });
+          // If there's text, we send a 'model' turn. This handles regular text responses.
+          if (textParts.length > 0) {
+            clientHistory.push({
+              ...turn,
+              role: 'model',
+              content: textParts.map(p => p.text).join(''),
+            });
+          }
+          // For each function call, we send a corresponding 'system' turn to display the action.
+          for (const part of functionCallParts) {
+            clientHistory.push({
+              id: `${turn.id}-action-${part.functionCall.name}`,
+              role: 'system',
+              type: 'action_executing',
+              content: `⚡️ **${part.functionCall.name}**\\n\`\`\`json\\n${JSON.stringify(part.functionCall.args, null, 2)}\\n\`\`\``,
+            });
+          }
+        } else if (turn.role === 'function') {
+            // For each function response, we send a 'system' turn to display the result.
+            for (const part of parts) {
+                if(part.functionResponse) {
+                    const response = part.functionResponse;
+                    const resultOutput = (response.response as { output?: string })?.output ?? 'No output.';
+                    const success = !String(resultOutput).startsWith('Error:');
+                    clientHistory.push({
+                        id: `${turn.id}-result-${response.name}`,
+                        role: 'system',
+                        type: 'action_result',
+                        content: resultOutput,
+                        success: success,
+                    });
+                }
             }
-          
-            processedIndices.add(i);
-            processedIndices.add(i + 1);
-            continue; // Skip the raw 'function' and 'model' turns
         }
-      }
-      
-      // Only add user turns or model turns that are simple text responses.
-      if (turn.role === 'user' || (turn.role === 'model' && !(turn.parts as unknown as Part[])?.some(p => p.functionCall))) {
-          clientHistory.push(turn);
+      } catch (e) {
+        this.logger.error(`Could not process turn with id ${turn.id} for client history: ${e.message}`, e.stack);
       }
     }
-    return clientHistory; // The client expects DESC order and will reverse it.
+    return clientHistory;
   }
 
   async countConversations(sessionId: string): Promise<number> {

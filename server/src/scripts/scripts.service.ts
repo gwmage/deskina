@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { Script } from '@prisma/client';
 
@@ -10,10 +10,35 @@ export class ScriptsService {
     userId: string;
     name: string;
     description?: string;
-    filePath: string;
-    content: string;
+    code: string; // 'content' is renamed to 'code' for clarity
   }): Promise<Script> {
-    return this.prisma.script.create({ data });
+    const existing = await this.prisma.script.findUnique({
+      where: {
+        userId_name: {
+          userId: data.userId,
+          name: data.name,
+        },
+      },
+    });
+    if (existing) {
+      // If script with same name exists, update it
+      return this.prisma.script.update({
+        where: { id: existing.id },
+        data: {
+          description: data.description,
+          code: data.code,
+        },
+      });
+    }
+    // Otherwise, create a new one
+    return this.prisma.script.create({ 
+        data: {
+            userId: data.userId,
+            name: data.name,
+            description: data.description,
+            code: data.code,
+        }
+    });
   }
 
   async findAllForUser(userId: string): Promise<Script[]> {
@@ -28,8 +53,23 @@ export class ScriptsService {
     return script;
   }
 
-  async findContent(id: string, userId: string): Promise<string> {
-    const script = await this.findOne(id, userId);
-    return script.content;
+  async findByName(name: string, userId: string): Promise<Script | null> {
+    const script = await this.prisma.script.findUnique({
+      where: {
+        userId_name: {
+          userId: userId,
+          name: name,
+        },
+      },
+    });
+    if (!script) {
+      throw new NotFoundException(`Script with name "${name}" not found.`);
+    }
+    return script;
+  }
+
+  async findContentByName(name: string, userId: string): Promise<string> {
+    const script = await this.findByName(name, userId);
+    return script.code;
   }
 } 

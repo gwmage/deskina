@@ -32,7 +32,7 @@ export class SessionController {
       limitNum,
       skip,
     );
-    const total = await this.sessionService.countConversations(id);
-    return { conversations, total };
+    const totalCount = await this.sessionService.countConversations(id);
+    return { conversations, totalCount };
   }
 }

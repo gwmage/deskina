@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import ReactDiffViewer from 'react-diff-viewer';
+import ReactDiffViewer from 'react-diff-viewer-continued';
 import remarkGfm from 'remark-gfm';
 import './App.css';
 
@@ -275,14 +275,15 @@ const App = () => {
     try {
       const response = await fetch(`${API_URL}/sessions/${sessionId}/conversations?page=${page}&limit=20`, { headers: { 'Authorization': `Bearer ${token}` } });
       if (!response.ok) throw new Error('Failed to fetch session history');
-      const data = await response.json();
+      const data = await response.json(); // data should contain { conversations: [], totalCount: number }
       const formattedHistory = data.conversations.map(turn => ({...turn, id: turn.id || `db-${Math.random()}`})).reverse();
       
       const savedCwd = localStorage.getItem(`cwd_${sessionId}`);
       setCurrentWorkingDirectory(savedCwd || defaultCwd);
 
       setConversation(prev => concat ? [...formattedHistory, ...prev] : formattedHistory);
-      setHasMoreConversations(data.conversations.length > 0 && (page * 20 < data.total));
+      // Correctly check if there are more pages
+      setHasMoreConversations(page * 20 < data.totalCount);
     } catch (error) {
       console.error('Failed to fetch history:', error);
       setConversation([]);
@@ -324,6 +325,8 @@ const App = () => {
         } else {
             result = await window.electronAPI.readFile({ filePath: toolCall.args.filePath, cwd: currentWorkingDirectory });
         }
+    } else if (toolCall.name === 'runScript') {
+      result = await window.electronAPI.runScript({ name: toolCall.args.name, token: token, cwd: currentWorkingDirectory });
     } else if (toolCall.name === 'editFile') {
       // editFile is handled via proposal UI, not direct execution here
       setEditProposal({ ...toolCall.args, originalContent: 'loading', toolCallId: toolCallId });
@@ -424,8 +427,8 @@ const App = () => {
           if (!jsonString) continue;
 
           try {
-            const data = JSON.parse(jsonString);
-            
+          const data = JSON.parse(jsonString);
+
             if (data.type === 'session_id') {
                 const newId = data.payload;
                 if (sessionId === 'temp' || !sessionId) {
@@ -433,14 +436,14 @@ const App = () => {
                     setSessions(prev => prev.map(s => (s.id === 'temp' ? { ...s, id: newId } : s)));
                     localStorage.setItem(`cwd_${newId}`, currentWorkingDirectory);
                 }
-            } else if (data.type === 'text_chunk') {
+          } else if (data.type === 'text_chunk') {
                 const textChunk = data.payload;
-                setConversation(prev => {
+            setConversation(prev => {
                   const lastTurn = prev.length > 0 ? prev[prev.length - 1] : null;
                   if (lastTurn && lastTurn.id === currentLastMessageId && lastTurn.role === 'model') {
                     const updatedTurn = { ...lastTurn, content: lastTurn.content + textChunk };
                     return [...prev.slice(0, -1), updatedTurn];
-                  } else {
+              } else {
                     const newTurn = { id: `model-${Date.now()}`, role: 'model', content: textChunk, isStreaming: true };
                     currentLastMessageId = newTurn.id;
                     return [...prev, newTurn];
@@ -451,7 +454,18 @@ const App = () => {
                   isStreaming: false
                 } : t)));
                 toolCallsToExecuteRef.current.push(data.payload);
-            } else if (data.type === 'final') {
+            } else if (data.type === 'server_action_result') {
+                // Handle results from server-side tools like createScript
+                const { success, message } = data.payload;
+                const resultTurn = {
+                    id: `result-server-${Date.now()}`,
+                    role: 'system',
+                    type: 'action_result',
+                    content: message,
+                    success: success,
+                };
+                setConversation(prev => [...prev, resultTurn]);
+          } else if (data.type === 'final') {
                 // Final message is handled by the 'done' condition
             }
           } catch (e) {
@@ -585,7 +599,7 @@ const App = () => {
     focusInput();
     isNewSessionRef.current = true;
   };
-  
+
   const handleSessionClick = (sessionId) => {
     if (sessionId === currentSessionId) return;
     isNewSessionRef.current = false; // Flag that we are switching to an existing session
@@ -606,7 +620,7 @@ const App = () => {
     } else {
       const userMessage = input.trim();
       if (!userMessage && !imageBase64) return;
-      
+
       const newTurn = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -634,7 +648,7 @@ const App = () => {
       setInput('');
       setImageBase64(null);
       setImagePreview(null);
-      
+
       const controller = new AbortController();
       abortControllerRef.current = controller;
       fetch(`${API_URL}/gemini/generate`, {
@@ -651,7 +665,7 @@ const App = () => {
           const resultTurn = { id: `result-aborted-${Date.now()}`, role: 'system', type: 'action_result', content: 'Request cancelled by user.', success: false };
           setConversation(prev => [...prev.map(t => ({...t, isStreaming: false})), resultTurn]);
         } else {
-          console.error('Error:', error);
+        console.error('Error:', error);
           setConversation(prev => [...prev, {id: `error-${Date.now()}`, role: 'system', type: 'action_result', content: `Error: ${error.message}`, success: false}])
         }
         setIsLoading(false);
@@ -663,7 +677,7 @@ const App = () => {
     if (conversationRef.current) prevScrollHeightRef.current = conversationRef.current.scrollHeight;
     setConversationPage(prev => prev + 1);
   };
-  
+
   const handleLogout = () => {
     localStorage.clear();
     setIsAuthenticated(false);
@@ -688,7 +702,7 @@ const App = () => {
       <h1>How can I help you today?</h1>
     </div>
   );
-  
+
   const renderTurn = (turn, index) => {
     // This function remains unchanged for now.
     let turnRoleClass = '';
@@ -701,7 +715,7 @@ const App = () => {
         break;
       case 'model':
         turnRoleClass = 'assistant';
-        turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
+           turnContent = <ReactMarkdown children={turn.content} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }} />;
         break;
       case 'system':
         if (turn.type === 'action_result') {
@@ -719,7 +733,7 @@ const App = () => {
     }
     return <div key={turn.id || index} className={`turn ${turnRoleClass}`}>{turnContent}</div>;
   };
-
+  
   const visibleConversation = conversation.slice(-MAX_MESSAGES);
   const lastTurn = conversation[conversation.length - 1];
   const isCurrentlyStreaming = lastTurn && lastTurn.role === 'model' && lastTurn.isStreaming;
@@ -729,12 +743,12 @@ const App = () => {
 
   return (
     <div className={`app-container ${isSidebarOpen ? 'sidebar-open' : ''}`}>
-      <Sidebar 
-        sessions={sessions} 
-        currentSessionId={currentSessionId} 
-        onSessionClick={handleSessionClick} 
-        onNewConversation={handleNewConversation} 
-        onLogout={handleLogout} 
+      <Sidebar
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        onSessionClick={handleSessionClick}
+        onNewConversation={handleNewConversation}
+        onLogout={handleLogout}
         isSidebarOpen={isSidebarOpen}
         onLoadMore={handleLoadMoreSessions}
         hasMore={hasMoreSessions}

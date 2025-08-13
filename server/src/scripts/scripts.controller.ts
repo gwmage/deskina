@@ -7,11 +7,11 @@ export class ScriptsController {
   constructor(private readonly scriptsService: ScriptsService) {}
 
   @UseGuards(JwtAuthGuard)
-  @Get(':id/content')
-  async getScriptContent(@Param('id') id: string, @Req() req) {
+  @Get('by-name/:name/content')
+  async getScriptContent(@Param('name') name: string, @Req() req) {
     const userId = req.user.id;
     try {
-      const content = await this.scriptsService.findContent(id, userId);
+      const content = await this.scriptsService.findContentByName(name, userId);
       return { content };
     } catch (error) {
       if (error instanceof NotFoundException) {

@@ -2,10 +2,11 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const isDev = require('electron-is-dev');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process'); // Import execFile
 const { TextDecoder } = require('util');
 const iconv = require('iconv-lite');
 const os = require('os');
+const http = require('http'); // For making API requests
 
 function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
@@ -159,12 +160,61 @@ ipcMain.handle('editFile', async (event, { filePath, newContent, cwd }) => {
   }
 });
 
-
+// This is a placeholder and will be replaced by the more robust run-script handler
 ipcMain.handle('createScript', async (event, { scriptName, scriptContent }) => {
-    // This is a placeholder. Implement actual logic to save the script.
-    console.log(`Creating script ${scriptName}`);
+    console.log(`Placeholder for createScript: ${scriptName}`);
     return { success: true, stdout: `Script "${scriptName}" created.` };
 });
+
+ipcMain.handle('run-script', async (event, { name, token, cwd }) => {
+  const options = {
+    hostname: 'localhost',
+    port: 3001,
+    path: `/scripts/by-name/${name}/content`,
+    method: 'GET',
+    headers: { 'Authorization': `Bearer ${token}` }
+  };
+
+  try {
+    const code = await new Promise((resolve, reject) => {
+      const req = http.request(options, (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`Server responded with status code ${res.statusCode}`));
+        }
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data).content);
+          } catch (e) {
+            reject(new Error('Failed to parse server response.'));
+          }
+        });
+      });
+      req.on('error', (e) => reject(e));
+      req.end();
+    });
+
+    const tempDir = os.tmpdir();
+    const tempFilePath = path.join(tempDir, `deskina_script_${Date.now()}.py`);
+    await fs.promises.writeFile(tempFilePath, code, 'utf-8');
+
+    return new Promise((resolve) => {
+      execFile('python', [tempFilePath], { cwd: cwd || os.homedir() }, (error, stdout, stderr) => {
+        fs.promises.unlink(tempFilePath); // Clean up the temp file
+        if (error) {
+          resolve({ success: false, stderr: `EXEC ERROR: ${error.message}\n\nSTDERR:\n${stderr}` });
+          return;
+        }
+        resolve({ success: true, stdout, stderr });
+      });
+    });
+
+  } catch (error) {
+    return { success: false, error: `Failed to fetch or execute script: ${error.message}` };
+  }
+});
+
 
 ipcMain.handle('get-home-dir', async () => {
   return os.homedir();
