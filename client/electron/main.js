@@ -253,10 +253,8 @@ ipcMain.handle(
             textContent += '\n';
           });
         } else {
-          return {
-            success: false,
-            error: `Unsupported file type for readText: ${extension}`,
-          };
+          // Default to reading as a plain text file for any other extension
+          textContent = fs.readFileSync(absolutePath, 'utf-8');
         }
         return { success: true, content: textContent };
       } else if (operation === 'writeFile') {
@@ -288,7 +286,8 @@ ipcMain.handle(
           XLSX.writeFile(workbook, absolutePath);
 
         } else {
-          return { success: false, error: 'writeFile operation is currently only supported for .docx and .xlsx files.' };
+          // Default to writing as a plain text file for any other extension
+          fs.writeFileSync(absolutePath, params.content, 'utf-8');
         }
 
         return { success: true, stdout: `File successfully saved to ${absolutePath}` };

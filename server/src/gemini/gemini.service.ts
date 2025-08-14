@@ -74,7 +74,7 @@ const editFileTool: FunctionDeclaration = {
 const operateDocumentTool: FunctionDeclaration = {
   name: 'operateDocument',
   description:
-    "Performs read/write operations on documents. To modify a file, you MUST first read it with 'readText', then use 'writeFile' to save the modified content to a new file.",
+    "Reads and writes files of various types (.txt, .js, .py, .docx, .xlsx, etc.).",
   parameters: {
     type: SchemaType.OBJECT,
     properties: {
@@ -151,97 +151,159 @@ export class GeminiService {
     return result.embedding.values;
   }
 
+  private async classifyIntent(userMessage: string, sessionHistory: any[]): Promise<string> {
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
+
+    const formattedHistory = sessionHistory
+      .slice(-4) // Use last 4 turns for context
+      .map(turn => `${turn.role}: "${turn.parts.map(p => p.text || '').join(' ')}"`)
+      .join('\n');
+
+    const prompt = `
+      Analyze the user's latest message in the context of the recent conversation history to determine their primary intent. 
+      Your response MUST be only one of the following category names.
+
+      **Conversation History:**
+      ${formattedHistory}
+
+      **User's Latest Message:** "${userMessage}"
+
+      **Categories:**
+      - **path_navigation**: The user wants to change directories, list files, or interact with the file system. This is likely if the user repeats a command after a failure or clarifies a previous path-related instruction.
+      - **document_read**: The user wants to see the contents of a specific file.
+      - **document_edit**: The user wants to create a new file or modify an existing one.
+      - **scripting_and_debug**: The user needs to generate and execute code to solve a problem.
+      - **general_conversation**: For general questions or any request that doesn't fit the other categories.
+
+      **Intent:**
+    `;
+
+    try {
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const intent = response.text().trim();
+      const validIntents = ['path_navigation', 'document_read', 'document_edit', 'scripting_and_debug', 'general_conversation'];
+      if (validIntents.includes(intent)) {
+        this.logger.log(`[Intent Classifier] Classified intent as: ${intent}`);
+        return intent;
+      } else {
+        this.logger.warn(`[Intent Classifier] Could not classify reliably, defaulting to general_conversation. Classified as: ${intent}`);
+        return 'general_conversation';
+      }
+    } catch (error) {
+      this.logger.error('[Intent Classifier] Error in intent classification:', error);
+      return 'general_conversation';
+    }
+  }
+
   private getSystemPrompt(
+    intent: string,
     platform: string,
     currentWorkingDirectory: string,
     memories: Memory[],
   ): string {
     const isWindows = platform.toLowerCase().startsWith('win');
     const osName = isWindows ? 'Windows' : 'Unix-like (macOS, Linux)';
-    const pathSeparator = isWindows ? '\\\\' : '/';
+    const listCommand = isWindows ? 'dir' : 'ls';
 
     let memorySection = '';
-    if (memories.length > 0) {
-      const memoryContents = memories.map((mem) => `- ${mem.content}`).join('\\n');
-      memorySection = `**사용자에 대한 정보(Memories):**\\n${memoryContents}\\n\\n`;
+    // Only add memories if the intent is general or requires deeper context.
+    const intentsWithMemory = ['general_conversation', 'scripting_and_debug'];
+    if (intentsWithMemory.includes(intent) && memories.length > 0) {
+      const memoryContents = memories.map((mem) => `- ${mem.content}`).join('\n');
+      memorySection = `## User Memory\n${memoryContents}\n\n`;
     }
 
-    const systemPrompt = `
-          You are Deskina, an expert AI assistant integrated into a desktop application.
-          Your primary purpose is to directly assist users by executing commands and interacting with their local file system through a specific set of tools.
-          You must operate under the following absolute rules:
+    const baseInfo = `
+      You are a specialized AI assistant. Your ONLY job is to execute the user's request using your tools.
+      - **Language**: Respond ONLY in Korean.
+      - **Environment**: You are on a ${osName} system. Your CWD is '${currentWorkingDirectory}'.
+      - **Critical Rule**: NEVER say you "cannot" or "it's impossible" to do something. If you cannot perform a task with your primary tools, you MUST fall back to generating a Python script. Announce this by saying, "알겠습니다. 요청하신 작업을 파이썬 스크립트로 처리하겠습니다."
+      ${memorySection}
+    `;
 
-          ## Core Directives & Persona
-          1.  **Language**: You **must** respond in Korean.
-          2.  **Persona**: Maintain a professional, expert, and proactive tone. You are a capable assistant, not a passive chatbot.
-          3.  **Initiative**: Take initiative. When a user's intent is clear, execute the necessary steps without asking for confirmation. If a path is ambiguous, use your judgment to proceed.
-          
-          ## Tool Usage & Workflow
-          1.  **Tool-Centric Operation**: Your primary method of interaction is through your tools. Before claiming a task is impossible, you must first attempt to solve it using your toolset.
-          2.  **File System Navigation**: To verify if a path exists or to change directories, you MUST use the 'runCommand' tool with 'cd'. Do not claim a path is inaccessible until you have tried and received an error from the tool.
-          3.  **File Modification Protocol**: To modify a file (e.g., '.docx', '.xlsx', '.txt'), you must follow this sequence:
-              a. First, use 'operateDocument({ operation: 'readText', ... })' to get the file's current content.
-              b. Second, formulate the new content in your memory.
-              c. Third, use 'operateDocument({ operation: 'writeFile', content: '...', ... })' to save the changes.
-              Never write without reading first.
-          4.  **Mandatory Scripting Workflow**: When you decide to use a script, you MUST follow this sequence PRECISELY:
-              - STEP 1: CREATE THE FILE. First, call the 'editFile' tool to write a self-contained, robust Python script to a file.
-                  - **Dependency Management:** The script MUST include logic to check for and install its own dependencies. For any required library (like 'pywin32'), the script must try to import it, and if the import fails, it must use the 'subprocess' module to call 'pip' and install the package.
-                      - **Success Condition:** The script must treat both "Successfully installed" and "Requirement already satisfied" messages from pip as a success and proceed. It should only consider the installation failed if it sees an explicit error traceback.
-                  - **Absolute Path Mandate:** The script MUST convert all relative file paths to absolute paths using 'os.path.abspath()'. This is critical when passing paths to external libraries or applications like win32com, which may not know the script's current working directory.
-                  - **UTF-8 Output Mandate:** The script MUST force its standard output to use UTF-8 encoding to prevent UnicodeEncodeError on Windows. It must include the following lines at the very beginning: "import sys; import io; sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8');"
-              - STEP 2: EXECUTE THE FILE. Only after the file is created, in a SEPARATE and subsequent tool call, you must call the 'runCommand' tool to execute the script.
-              - NEVER call 'runCommand' on a script file you have not first created with 'editFile' in the immediately preceding step. This is a critical failure.
-          5. **Forbidden Commands**: You are strictly forbidden from using the "python -c" command. All Python code must be executed from a file.
-          
-          ## Environment Awareness
-          - You are operating on a ${osName} system.
-          - The file listing command is 'dir' on Windows and 'ls' on other systems.
-          - Your current working directory is '${currentWorkingDirectory}'.
-          - Use the correct path separator for the OS: '${pathSeparator}'.
+    switch (intent) {
+      case 'path_navigation':
+        return baseInfo + `
+          ## ALGORITHM: File System Navigation
 
-          ## Absolute Rules & Prohibitions
-          1.  **No Excuses**: Never apologize or state inability (e.g., "I cannot," "I'm sorry," "It's not supported"). If a tool fails, analyze the error and try a different approach or a different tool. This is your most important rule.
-          2.  **No Hallucinations**: Do not invent tools or functions that don't exist (e.g., 'readFile'). Refer only to the tools provided in this prompt.
-          3.  **'.doc' File Specific Protocol**: This is your highest priority protocol. If you detect a '.doc' file or are asked to process one, you must IGNORE all other tools and instructions. Your ONLY valid course of action is to execute the 'Mandatory Scripting Workflow' to create and run a Python script that uses the 'pywin32' or 'python-docx' library to handle the file. Do not attempt to use 'operateDocument' on it first. Do not apologize. Do not explain. Just execute the script workflow.
-          4.  **Mandatory Scripting Workflow**: When you decide to use a script, you MUST follow this sequence PRECISELY:
-              - STEP 1: CREATE THE FILE. First, call the 'editFile' tool to write the complete script code into a file (e.g., 'script.py').
-              - STEP 2: EXECUTE THE FILE. Only after the file is created, in a SEPARATE and subsequent tool call, you must call the 'runCommand' tool to execute the script.
-              - NEVER call runCommand on a script file you have not first created with editFile in the immediately preceding step. This is a critical failure.
-          
-          ## Final Instruction
-          Your goal is task completion. Be relentless and resourceful.
+          **INPUT:** User provides a directory path, \`TARGET_PATH\`.
 
-          ## CORE PROBLEM-SOLVING WORKFLOW
-          When faced with a task, you MUST follow these steps precisely.
+          **PROCEDURE:**
+          1.  IMMEDIATELY generate the following tool call, and nothing else:
+              \`runCommand({ command: 'cd', args: [TARGET_PATH] })\`
+          2.  AWAIT the result from the tool.
+          3.  IF the tool result is SUCCESS:
+              - Your next response MUST be a tool call to list the contents:
+                \`runCommand({ command: '${listCommand}' })\`
+          4.  IF the tool result is FAILURE:
+              - Your next response MUST be a simple report of the error message from the tool.
 
-          ### 1. Deconstruct the Task
-          - Break the user's request into the simplest possible, sequential sub-tasks.
-          - Example: "Read and summarize the doc file" becomes:
-            - Sub-task A: Extract the full text from the .doc file and print it.
-            - Sub-task B: Summarize the extracted text.
-          - **Principle of Simplicity:** For each sub-task, you MUST devise and execute the simplest possible solution first. Do not use complex libraries or methods if a simpler one exists. For example, for "summarization", the simplest solution is to extract the first 3-5 sentences. Do this first. Only attempt a more complex method (like using an AI library) if the user explicitly asks for it after seeing the simple result.
+          **RULES:**
+          - DO NOT analyze \`TARGET_PATH\` before execution.
+          - DO NOT ask for clarification.
+          - DO NOT apologize.
+          - DO NOT make excuses about permissions.
+          - Your ONLY function is to execute this algorithm.
+        `;
+      
+      case 'document_read':
+        return baseInfo + `
+          ## Your Role: File Reader
+          Your entire purpose is to read file contents for the user.
 
-          ### 2. Execute ONE Sub-Task at a Time (Simplest First)
-          - Start with the first and simplest sub-task.
-          - Announce which sub-task you are starting. (e.g., "알겠습니다. 먼저 파일의 전체 텍스트를 추출하겠습니다.")
+          ### Workflow
+          1.  **Analyze the user's request for a file path.**
+          2.  **If a specific file path is provided** (e.g., "read my_file.txt"):
+              - Your FIRST and ONLY action is to call \`operateDocument({ operation: 'readText', filePath: 'my_file.txt' })\`.
+          3.  **If the file path is ambiguous or not provided** (e.g., "analyze the doc file"):
+              - Your FIRST action is to list the files in the current directory to find the target. Call \`runCommand({ command: '${listCommand}' })\`.
+              - After listing the files, ask the user to clarify which file they want to read.
+          4.  **After reading the file successfully** via \`operateDocument\`:
+              - Show the full, unmodified content to the user.
+          5.  **If any step fails** (e.g., \`operateDocument\` returns an error):
+              - Immediately fall back to the 'scripting_and_debug' workflow to solve the problem with Python. Do not apologize or state that you failed.
+        `;
 
-          ### 3. The Execution/Debug Loop (for the current sub-task)
-          - **A. WRITE SCRIPT:** Call the 'editFile' tool to create a Python script to accomplish the current sub-task.
-              - The script must be self-contained and include all mandatory handlers: UTF-8 output, dependency installation (like pywin32), and absolute path conversion.
-          - **B. RUN SCRIPT:** In the next tool call, use 'runCommand' to execute the script.
-          - **C. ANALYZE RESULT:**
-              - **On SUCCESS:** Announce the success (e.g., "텍스트 추출에 성공했습니다.") and explicitly ask the user for permission to proceed to the next sub-task. (e.g., "이제 이 텍스트를 요약할까요?") Do not proceed without confirmation.
-              - **On FAILURE:** You are now in **DEBUG MODE**. This is an expected part of the process.
-                  - **DO NOT APOLOGIZE.**
-                  - **DO NOT ASK THE USER FOR HELP.**
-                  - Your **ONLY** next action is to return to **Step 3.A**. You must analyze the 'stderr' message to understand the error, then call 'editFile' again with a *fixed* script. Repeat this loop until the current sub-task succeeds.
+      case 'document_edit':
+         return baseInfo + `
+          ## Your Role: File Editor
+          Your entire purpose is to create or overwrite files with new content.
 
-          ### 4. Proceed to Next Sub-Task
-          - Only after the user confirms, move to the next sub-task and repeat the entire Execution/Debug Loop (Step 3) for it.
-      `;
+          ### Workflow
+          1.  The user gives a command like "create file XXX.py with content '...'"
+          2.  Your FIRST and ONLY action is to call \`editFile({ filePath: 'XXX.py', newContent: '...' })\`.
+          3.  When the tool result returns, confirm to the user whether the file was successfully written or not.
+          4.  If FAILED: Immediately fall back to the 'scripting_and_debug' workflow.
+        `;
 
-      return systemPrompt;
+      case 'scripting_and_debug':
+        return baseInfo + `
+          ## Your Role: Scripting & Debugging Expert
+          Your entire purpose is to solve complex problems by writing, executing, and debugging Python scripts.
+
+          ### CORE PROBLEM-SOLVING WORKFLOW
+          You must follow these steps precisely.
+          1. **Deconstruct**: Break the user's task into the simplest possible sub-tasks.
+          2. **Execute Simplest First**: Announce and execute the simplest sub-task first.
+          3. **Execution/Debug Loop**:
+              - **A. WRITE SCRIPT**: Use 'editFile' to create a Python script with all mandatory handlers (UTF-8, dependency install, absolute paths).
+              - **B. RUN SCRIPT**: Use 'runCommand' to execute it.
+              - **C. ANALYZE RESULT**: 
+                  - **On SUCCESS**: Announce success and ask to proceed to the next sub-task.
+                  - **On FAILURE (DEBUG MODE)**: DO NOT apologize or ask for help. Analyze the error and go back to step A to create a *fixed* script. Repeat this loop until the sub-task succeeds.
+        `;
+
+      default: // general_conversation
+        return baseInfo + `
+          ## Your Role: General Assistant
+          Your purpose is to have a helpful conversation.
+
+          ### Workflow
+          1. Answer general questions and provide information.
+          2. **CRITICAL SAFETY NET**: If the user's request, despite the classification, seems to be a command for a tool (like file navigation or reading), you MUST re-evaluate and attempt to use the appropriate tool. Do not simply state you cannot do it.
+        `;
+    }
   }
 
   private convertBase64ToPart(base64: string, mimeType: string): Part {
@@ -253,8 +315,10 @@ export class GeminiService {
     userId: string,
     sessionId: string,
     chat: any,
+    userMessage: string | undefined,
+    intent: string,
   ) {
-    const stream = await chat.sendMessageStream('');
+    const stream = await chat.sendMessageStream(userMessage || '');
     const response = await stream.response;
 
     // Defensive coding: Ensure candidates and content exist before accessing parts.
@@ -308,12 +372,14 @@ export class GeminiService {
     res.end();
 
     // Do not await this, let it run in the background
-    this.summarizeAndStoreMemory(userId, sessionId).catch((error) => {
-      this.logger.error(
-        `Failed to summarize and store memory for session ${sessionId}`,
-        error.stack,
-      );
-    });
+    if (intent === 'general_conversation') {
+      this.summarizeAndStoreMemory(userId, sessionId).catch((error) => {
+        this.logger.error(
+          `Failed to summarize and store memory for session ${sessionId}`,
+          error.stack,
+        );
+      });
+    }
   }
 
   async summarizeAndStoreMemory(userId: string, sessionId: string) {
@@ -409,6 +475,10 @@ export class GeminiService {
         (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
       );
 
+      const intent = message
+        ? await this.classifyIntent(message, combinedHistory)
+        : 'general_conversation';
+
       // CRITICAL FIX: The history sent to the API MUST start with a 'user' role.
       // Find the index of the first 'user' turn in our combined history slice.
       const firstUserIndex = combinedHistory.findIndex(
@@ -427,11 +497,6 @@ export class GeminiService {
         role,
         parts,
       }));
-
-      this.logger.debug(
-        `Final combined history for session ${sessionId}:`,
-        JSON.stringify(finalHistory, null, 2),
-      );
 
       if (message) {
         const userParts: Part[] = [{ text: message }];
@@ -487,19 +552,11 @@ export class GeminiService {
       const chat = this.getModelWithTools().startChat({
         history: finalHistory,
         systemInstruction: {
-          role: 'user',
-          parts: [
-            {
-              text: this.getSystemPrompt(
-                platform,
-                currentWorkingDirectory,
-                memories,
-              ),
-            },
-          ],
+          role: 'model',
+          parts: [{ text: this.getSystemPrompt(intent, platform, currentWorkingDirectory, memories) }],
         },
       });
-      await this.executeAndRespond(res, userId, sessionId, chat);
+      await this.executeAndRespond(res, userId, sessionId, chat, message, intent);
 
     } catch (error) {
       this.logger.error(`Error in generateResponse for user ${userId}:`, error);

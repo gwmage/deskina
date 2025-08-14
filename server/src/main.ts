@@ -22,7 +22,7 @@ global.fetch = async (url: any, options: any) => {
       
       logger.debug(`<-- Response from: ${urlString}`);
       logger.debug(`<-- Response status: ${response.status}`);
-      logger.debug(`<-- Response body: ${responseBody}`);
+      if(responseBody && !responseBody.includes('\"embedding\":')) logger.debug(`<-- Response body: ${responseBody}`);
 
       return response;
     } catch (error) {
